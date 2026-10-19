@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/Code-Hex/vz/v3"
+	"golang.org/x/sys/unix"
 )
 
 // vzBackend runs the guest with Apple's Virtualization.framework. The
@@ -24,9 +25,14 @@ func (vzBackend) Name() string          { return "vz" }
 func (vzBackend) NeedsGuestImage() bool { return true }
 func (vzBackend) NeedsRoot() bool       { return false }
 
-// Available is optimistic: hosts without hypervisor support fail in
-// Validate/Start with a descriptive error.
-func (vzBackend) Available() error { return nil }
+// Available requires hypervisor support (kern.hv_support), which is absent
+// e.g. inside VMs on M1 hosts that cannot nest virtualization.
+func (vzBackend) Available() error {
+	if v, err := unix.SysctlUint32("kern.hv_support"); err != nil || v != 1 {
+		return fmt.Errorf("Virtualization.framework is not available: the host has no hypervisor support (kern.hv_support unset; nested virtualization is unsupported here)")
+	}
+	return nil
+}
 
 type vzMachine struct {
 	vm   *vz.VirtualMachine

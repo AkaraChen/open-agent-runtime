@@ -106,6 +106,13 @@ func DefaultBackend() string {
 	}
 	switch runtime.GOOS {
 	case "darwin":
+		// prefer Virtualization.framework, fall back to QEMU (HVF or TCG)
+		if b, err := Get("vz"); err == nil && b.Available() == nil {
+			return "vz"
+		}
+		if b, err := Get("qemu"); err == nil && b.Available() == nil {
+			return "qemu"
+		}
 		return "vz"
 	case "windows":
 		return "wsl2"

@@ -101,8 +101,24 @@ base PATH.
 | `wsl2`    | Windows       | imports the guest rootfs as a WSL2 distro (experimental)                                       |
 | `android` | —             | extension point (AVF/crosvm), not part of the MVP                                              |
 
-The default is `vz` on macOS, `native` on Linux and `wsl2` on Windows; override it with `--backend` or
-`OAR_BACKEND`.
+Defaults by host:
+
+- **macOS:** `vz` when the host has hypervisor support (`kern.hv_support`), otherwise `qemu`.
+- **Linux:** `native`.
+- **Windows:** `wsl2`.
+
+Override the default with `--backend` or `OAR_BACKEND`.
+
+Verified in CI:
+
+| host | backend | guest | result |
+|------|---------|-------|--------|
+| Ubuntu (GitHub runner) | `native` | host kernel | full acceptance suite |
+| Ubuntu (GitHub runner) | `kvm` | linux/amd64, boots in under 1 s | full acceptance suite |
+| macOS 15 Intel | `vz` | linux/amd64 | full acceptance suite |
+| macOS 15 Apple Silicon | `qemu` (TCG) | linux/arm64 | full acceptance suite |
+| macOS 15 Apple Silicon | `vz` | — | runner is an M1 VM without nested virtualization; detected and reported, falls back to `qemu` |
+| Windows | — | — | unit tests and build only; WSL2 is experimental |
 
 ```console
 $ guest/build.sh arm64          # kernel + initramfs -> guest/out/arm64 (docker + go)
