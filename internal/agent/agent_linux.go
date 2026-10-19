@@ -47,7 +47,9 @@ type Server struct {
 	layout compose.Layout
 	booted time.Time
 	mu     sync.Mutex // serializes container lifecycle operations
-	warmMu sync.Map   // per-key locks for warm.put
+	// cleanups tracks background removal of retired instances
+	cleanups sync.WaitGroup
+	warmMu   sync.Map // per-key locks for warm.put
 }
 
 // New prepares the state directories.
@@ -376,9 +378,9 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	default:
 		return nil, fmt.Errorf("unknown reload strategy %q (want overlap or replace)", a.Strategy)
 	}
+	t0 := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t0 := time.Now()
 	old, _ := s.current(a.Name)
 	if old != nil && !reload {
 		st := s.observe(ctx, old)
@@ -490,9 +492,10 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		result.Replaced = old.ID
 		// cleanup is off the critical path; the retired instance is
 		// already invisible to name lookups
+		// it does not take s.mu, so it never delays the next switch
+		s.cleanups.Add(1)
 		go func(old *instance) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
+			defer s.cleanups.Done()
 			if err := s.destroy(context.Background(), old, true); err != nil {
 				fmt.Fprintf(os.Stderr, "oar-agent: cleanup of %s failed: %v\n", old.ID, err)
 			}
@@ -721,6 +724,7 @@ func (s *Server) logs(ctx context.Context, a proto.LogsArgs, rs *proto.ResponseS
 
 // StopAll stops and removes every managed container.
 func (s *Server) StopAll(ctx context.Context) {
+	s.cleanups.Wait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	list, _ := s.loadInstances()
