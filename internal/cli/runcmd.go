@@ -41,6 +41,9 @@ type session struct {
 // open connects to the guest (booting it if needed) and loads the lock for
 // the guest's architecture, rebuilding artifacts first unless noBuild.
 func open(ctx context.Context, g *globalOpts, build bool) (*session, error) {
+	if g.bundle != "" {
+		return openBundle(ctx, g)
+	}
 	cfg, err := g.loadConfig()
 	if err != nil {
 		return nil, err
@@ -58,13 +61,29 @@ func open(ctx context.Context, g *globalOpts, build bool) (*session, error) {
 			return nil, err
 		}
 	}
-	lock, err := manifest.Read(builder.LockPath(s.art))
+	pl, err := builder.BundleForConfig(s.art, cfg, platform)
 	if err != nil {
-		return nil, fmt.Errorf("%w (run oar build first)", err)
+		return nil, err
 	}
-	pl, ok := lock.Platforms[platform]
-	if !ok {
-		return nil, fmt.Errorf("lock has no %s bundle; run oar build --platform %s", platform, platform)
+	s.lock = pl
+	return s, nil
+}
+
+// openBundle uses a previously compiled bundle by digest. No config file,
+// build tools or network are needed: only the artifacts directory.
+func openBundle(ctx context.Context, g *globalOpts) (*session, error) {
+	cfg, _ := g.loadConfig() // optional
+	s := &session{g: g, cfg: cfg, art: g.artifactsDir(cfg)}
+	pl, err := builder.FindBundle(s.art, g.bundle)
+	if err != nil {
+		return nil, err
+	}
+	s.client, s.info, err = ensureVM(ctx, g)
+	if err != nil {
+		return nil, err
+	}
+	if pl.Platform != "linux/"+s.info.Arch {
+		return nil, fmt.Errorf("bundle %s is for %s, the guest is linux/%s", shortKey(pl.BundleDigest), pl.Platform, s.info.Arch)
 	}
 	s.lock = pl
 	return s, nil
@@ -129,6 +148,7 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	sort.Slice(st.Missing, func(i, j int) bool { return st.Missing[i].Size > st.Missing[j].Size })
 	var sent atomic.Int64
 	var mu sync.Mutex
+	var lastPct int64
 	eg, ectx := errgroup.WithContext(ctx)
 	eg.SetLimit(4)
 	for _, it := range st.Missing {
@@ -144,8 +164,13 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 			}
 			n := sent.Add(fi.Size())
 			if verbose {
+				// report large artifacts and every 25% of progress
 				mu.Lock()
-				fmt.Fprintf(os.Stderr, "  %3d%%  %s %s\n", n*100/max(total, 1), it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)))
+				pct := n * 100 / max(total, 1)
+				if fi.Size() >= 16<<20 || pct/25 > lastPct/25 {
+					fmt.Fprintf(os.Stderr, "  %3d%%  %s %s (%s)\n", pct, it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), human(fi.Size()))
+				}
+				lastPct = pct
 				mu.Unlock()
 			}
 			return nil
@@ -276,8 +301,9 @@ func composeCmd(g *globalOpts) *cobra.Command {
 }
 
 func runLike(g *globalOpts, reload bool) *cobra.Command {
-	var name string
+	var name, strategy string
 	var noBuild bool
+	var stopTimeout time.Duration
 	use, short := "run", "Build (incrementally), warm, compose and start the container"
 	if reload {
 		use, short = "reload", "Rebuild and start a new instance, then retire the old one"
@@ -305,7 +331,8 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 				op = proto.OpReload
 			}
 			var res proto.RunResult
-			if err := s.client.Call(ctx, op, proto.RunArgs{Name: name, Lock: s.lock}, &res); err != nil {
+			args := proto.RunArgs{Name: name, Lock: s.lock, Strategy: strategy, StopTimeout: stopTimeout}
+			if err := s.client.Call(ctx, op, args, &res); err != nil {
 				return err
 			}
 			out := map[string]any{"result": res, "build": tBuild, "warm": ws, "total": time.Since(t0)}
@@ -317,11 +344,19 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 				}
 				fmt.Printf("%s %s (%s, pid %d)\n  bundle %s\n", verb, c.Name, c.ID, c.Pid, c.BundleDigest)
 				t := res.Timings
-				fmt.Printf("  compose %s (cached=%v), instantiate %s, runc create %s, start %s; guest total %s\n",
+				fmt.Printf("  compose %s (cached=%v), instantiate %s, runc create %s, start %s",
 					t.Compose.Round(time.Microsecond), res.Cached, t.Instantiate.Round(time.Microsecond),
-					t.Create.Round(time.Millisecond), t.Start.Round(time.Millisecond), t.Total.Round(time.Millisecond))
+					t.Create.Round(time.Millisecond), t.Start.Round(time.Millisecond))
+				if t.Ready > 0 {
+					fmt.Printf(", ready %s", t.Ready.Round(time.Millisecond))
+				}
+				fmt.Printf("; guest total %s\n", t.Total.Round(time.Millisecond))
 				if res.Replaced != "" {
-					fmt.Printf("  retired %s\n", res.Replaced)
+					fmt.Printf("  retired %s (strategy %s, old stopped in %s", res.Replaced, res.Strategy, t.StopOld.Round(time.Millisecond))
+					if res.Strategy == proto.StrategyReplace {
+						fmt.Printf(", downtime %s", t.Downtime.Round(time.Millisecond))
+					}
+					fmt.Println(")")
 				}
 			})
 			return nil
@@ -329,6 +364,11 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 	}
 	c.Flags().StringVar(&name, "name", "", "container name (default: config directory name)")
 	c.Flags().BoolVar(&noBuild, "no-build", false, "use the existing lock without rebuilding")
+	if reload {
+		c.Flags().StringVar(&strategy, "strategy", proto.StrategyOverlap,
+			"overlap: start new, then stop old (needs SO_REUSEPORT for shared ports); replace: create new, stop old, start new")
+		c.Flags().DurationVar(&stopTimeout, "stop-timeout", 10*time.Second, "grace period for the old instance")
+	}
 	return c
 }
 

@@ -122,3 +122,19 @@ func TestInlineContentValidation(t *testing.T) {
 		t.Fatal("source without path or content accepted")
 	}
 }
+
+func TestReadyValidation(t *testing.T) {
+	c := cfgWith([]string{"nix:git"})
+	c.Process.Ready = &Ready{TCP: "127.0.0.1:80"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Process.Ready = &Ready{TCP: "127.0.0.1:80", Log: "ready"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("two readiness checks accepted")
+	}
+	c.Process.Ready = &Ready{}
+	if err := c.Validate(); err == nil {
+		t.Fatal("empty readiness check accepted")
+	}
+}

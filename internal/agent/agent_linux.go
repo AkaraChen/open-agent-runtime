@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/compose"
 	"github.com/AkaraChen/open-agent-runtime/internal/proto"
@@ -366,6 +369,13 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	if !validName(a.Name) {
 		return nil, fmt.Errorf("invalid container name %q", a.Name)
 	}
+	switch a.Strategy {
+	case "":
+		a.Strategy = proto.StrategyOverlap
+	case proto.StrategyOverlap, proto.StrategyReplace:
+	default:
+		return nil, fmt.Errorf("unknown reload strategy %q (want overlap or replace)", a.Strategy)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t0 := time.Now()
@@ -405,38 +415,139 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		return nil, err
 	}
 	tCreate := time.Now()
-	if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
-		s.destroy(ctx, in, true)
-		return nil, err
-	}
-	tStart := time.Now()
-
 	result := &proto.RunResult{
-		Cached: res.Cached,
+		Cached:   res.Cached,
+		Strategy: a.Strategy,
 		Timings: proto.Timings{
 			Compose:     tCompose.Sub(t0),
 			Instantiate: tInst.Sub(tCompose),
 			Create:      tCreate.Sub(tInst),
-			Start:       tStart.Sub(tCreate),
 		},
 	}
-	// reload: the new instance is running; retire and destroy the old one
-	if old != nil {
+	grace := a.StopTimeout
+	if grace <= 0 {
+		grace = 10 * time.Second
+	}
+	stopOld := func() {
 		old.Retired = true
 		_ = old.save()
 		s.cfg.Runc.Kill(ctx, old.ID, "TERM")
-		if !s.cfg.Runc.WaitStopped(ctx, old.ID, 10*time.Second) {
+		if !s.cfg.Runc.WaitStopped(ctx, old.ID, grace) {
 			s.cfg.Runc.Kill(ctx, old.ID, "KILL")
 			s.cfg.Runc.WaitStopped(ctx, old.ID, 5*time.Second)
 		}
-		if err := s.destroy(ctx, old, true); err != nil {
-			return nil, fmt.Errorf("new instance %s started, but removing %s failed: %w", in.ID, old.ID, err)
+	}
+	ready := func() error {
+		tR := time.Now()
+		err := s.waitReady(ctx, in, a.Lock.Ready)
+		result.Timings.Ready = time.Since(tR)
+		return err
+	}
+	if old != nil && a.Strategy == proto.StrategyReplace {
+		// The new container is fully created (namespaces, mounts, cgroup)
+		// but its process has not exec'd yet, so it holds no ports. Stop
+		// the old one, then start the new one immediately.
+		tStop := time.Now()
+		stopOld()
+		result.Timings.StopOld = time.Since(tStop)
+		tS := time.Now()
+		if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
+			s.destroy(ctx, in, true)
+			old.Retired = false
+			_ = old.save()
+			return nil, fmt.Errorf("start new instance (old %s already stopped): %w", old.ID, err)
 		}
+		result.Timings.Start = time.Since(tS)
+		if err := ready(); err != nil {
+			return nil, fmt.Errorf("new instance %s started but is not ready (old %s already stopped): %w", in.ID, old.ID, err)
+		}
+		result.Timings.Downtime = time.Since(tStop)
+	} else {
+		tS := time.Now()
+		if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
+			s.destroy(ctx, in, true)
+			return nil, err
+		}
+		result.Timings.Start = time.Since(tS)
+		if err := ready(); err != nil {
+			if old != nil {
+				// atomic switch: keep serving from the old instance
+				s.cfg.Runc.Kill(ctx, in.ID, "KILL")
+				s.cfg.Runc.WaitStopped(ctx, in.ID, 5*time.Second)
+				s.destroy(ctx, in, true)
+				return nil, fmt.Errorf("new instance not ready, rolled back to %s: %w", old.ID, err)
+			}
+			return nil, fmt.Errorf("container %s started but is not ready: %w", in.ID, err)
+		}
+		if old != nil {
+			// overlap: the new instance is serving; retire the old one
+			tStop := time.Now()
+			stopOld()
+			result.Timings.StopOld = time.Since(tStop)
+		}
+	}
+	if old != nil {
 		result.Replaced = old.ID
+		// cleanup is off the critical path; the retired instance is
+		// already invisible to name lookups
+		go func(old *instance) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if err := s.destroy(context.Background(), old, true); err != nil {
+				fmt.Fprintf(os.Stderr, "oar-agent: cleanup of %s failed: %v\n", old.ID, err)
+			}
+		}(old)
 	}
 	result.Timings.Total = time.Since(t0)
 	result.Container = s.observe(ctx, in)
 	return result, nil
+}
+
+// waitReady polls a readiness check until it succeeds or times out.
+func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready) error {
+	if r == nil {
+		return nil
+	}
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var last error
+	for {
+		switch {
+		case r.TCP != "":
+			c, err := net.DialTimeout("tcp", r.TCP, 200*time.Millisecond)
+			if err == nil {
+				c.Close()
+				return nil
+			}
+			last = err
+		case len(r.Exec) > 0:
+			code, _, stderr, err := s.cfg.Runc.Exec(ctx, in.ID, nil, r.Exec)
+			if err == nil && code == 0 {
+				return nil
+			}
+			last = fmt.Errorf("exit %d: %v %s", code, err, strings.TrimSpace(stderr))
+		case r.Log != "":
+			b, err := os.ReadFile(filepath.Join(in.dir, "console.log"))
+			if err == nil && strings.Contains(string(b), r.Log) {
+				return nil
+			}
+			last = fmt.Errorf("%q not in output yet", r.Log)
+		}
+		if st := s.observe(ctx, in); st.Status == "stopped" || st.Status == "deleted" {
+			return fmt.Errorf("container exited before becoming ready")
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("readiness timed out after %s: %v", timeout, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // instantiate creates the per-instance bundle directory: an overlay mount of
@@ -549,6 +660,9 @@ func (s *Server) list(ctx context.Context) (*proto.ListResult, error) {
 	}
 	res := &proto.ListResult{Containers: []proto.Container{}}
 	for _, in := range list {
+		if in.Retired {
+			continue // being cleaned up after a reload
+		}
 		res.Containers = append(res.Containers, s.observe(ctx, in))
 	}
 	return res, nil

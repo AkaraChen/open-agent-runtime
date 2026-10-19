@@ -62,10 +62,23 @@ type ComposeResult struct {
 	Layers       []string      `json:"layers"`
 }
 
+// Reload strategies.
+const (
+	// StrategyOverlap starts the new instance, then stops the old one. No
+	// gap, but both run briefly (services need SO_REUSEPORT to share ports).
+	StrategyOverlap = "overlap"
+	// StrategyReplace creates the new instance (not yet exec'd), stops the
+	// old one, then starts the new one. The gap is the old instance's exit
+	// time plus `runc start`.
+	StrategyReplace = "replace"
+)
+
 // RunArgs composes and starts a container.
 type RunArgs struct {
-	Name string                 `json:"name"`
-	Lock *manifest.PlatformLock `json:"lock"`
+	Name        string                 `json:"name"`
+	Lock        *manifest.PlatformLock `json:"lock"`
+	Strategy    string                 `json:"strategy,omitempty"`
+	StopTimeout time.Duration          `json:"stopTimeout,omitempty"`
 }
 
 // Timings of a run, all measured inside the guest.
@@ -74,13 +87,18 @@ type Timings struct {
 	Instantiate time.Duration `json:"instantiate"`
 	Create      time.Duration `json:"create"`
 	Start       time.Duration `json:"start"`
-	Total       time.Duration `json:"total"`
+	Ready       time.Duration `json:"ready,omitempty"`
+	StopOld     time.Duration `json:"stopOld,omitempty"`
+	// Downtime is the window with no running instance (replace strategy).
+	Downtime time.Duration `json:"downtime,omitempty"`
+	Total    time.Duration `json:"total"`
 }
 
 // RunResult describes a started container.
 type RunResult struct {
 	Container Container `json:"container"`
 	Cached    bool      `json:"cached"`
+	Strategy  string    `json:"strategy,omitempty"`
 	Timings   Timings   `json:"timings"`
 	Replaced  string    `json:"replaced,omitempty"`
 }

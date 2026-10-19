@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // LockVersion is bumped whenever the lock schema changes incompatibly.
@@ -34,7 +35,18 @@ type PlatformLock struct {
 	Components   []Component `json:"components"`
 	Process      Process     `json:"process"`
 	Hostname     string      `json:"hostname"`
-	Warnings     []string    `json:"warnings,omitempty"`
+	// Ready is a lifecycle readiness check; it does not change what the
+	// container observes and is therefore not part of the bundle digest.
+	Ready    *Ready   `json:"ready,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// Ready is a readiness check.
+type Ready struct {
+	TCP     string        `json:"tcp,omitempty"`
+	Exec    []string      `json:"exec,omitempty"`
+	Log     string        `json:"log,omitempty"`
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // Base is a flattened OCI image root filesystem.

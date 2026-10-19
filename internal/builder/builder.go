@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -39,6 +40,96 @@ type Builder struct {
 // LockPath returns the lock location inside an artifacts dir.
 func LockPath(artifacts string) string {
 	return filepath.Join(artifacts, "manifests", "bundle.lock.json")
+}
+
+// BundlesDir holds one immutable lock per compiled bundle digest.
+func BundlesDir(artifacts string) string { return filepath.Join(artifacts, "manifests", "bundles") }
+
+// BundlePath is the lock file of a compiled bundle.
+func BundlePath(artifacts, digest string) string {
+	_, h, ok := strings.Cut(digest, ":")
+	if !ok {
+		h = digest
+	}
+	return filepath.Join(BundlesDir(artifacts), h+".json")
+}
+
+// ConfigIndex maps one config file content to its compiled bundles.
+type ConfigIndex struct {
+	Config    string            `json:"config"`    // config hash
+	Path      string            `json:"path"`      // where it was built from
+	Platforms map[string]string `json:"platforms"` // platform -> bundle digest
+}
+
+func configIndexPath(artifacts, hash string) string {
+	_, h, _ := strings.Cut(hash, ":")
+	return filepath.Join(artifacts, "manifests", "configs", h+".json")
+}
+
+func recordConfig(artifacts string, cfg *spec.Config, lock *manifest.Lock) error {
+	p := configIndexPath(artifacts, cfg.Hash)
+	var idx ConfigIndex
+	_ = manifest.ReadJSON(p, &idx)
+	if idx.Platforms == nil {
+		idx.Platforms = map[string]string{}
+	}
+	idx.Config, idx.Path = cfg.Hash, cfg.Dir
+	for _, pl := range cfg.AllPlatforms() {
+		if b, ok := lock.Platforms[pl]; ok {
+			idx.Platforms[pl] = b.BundleDigest
+		}
+	}
+	return manifest.WriteJSON(p, &idx)
+}
+
+// BundleForConfig returns the bundle compiled from exactly this config
+// content for a platform.
+func BundleForConfig(artifacts string, cfg *spec.Config, platform string) (*manifest.PlatformLock, error) {
+	var idx ConfigIndex
+	if err := manifest.ReadJSON(configIndexPath(artifacts, cfg.Hash), &idx); err != nil {
+		return nil, fmt.Errorf("this config has not been compiled yet (run oar build)")
+	}
+	d, ok := idx.Platforms[platform]
+	if !ok {
+		return nil, fmt.Errorf("this config has not been compiled for %s (run oar build --platform %s)", platform, platform)
+	}
+	return FindBundle(artifacts, d)
+}
+
+// FindBundle loads a compiled bundle by full digest or unique hex prefix.
+func FindBundle(artifacts, ref string) (*manifest.PlatformLock, error) {
+	_, h, ok := strings.Cut(ref, ":")
+	if !ok {
+		h = ref
+	}
+	if len(h) < 6 {
+		return nil, fmt.Errorf("bundle reference %q is too short (need at least 6 hex characters)", ref)
+	}
+	entries, err := os.ReadDir(BundlesDir(artifacts))
+	if err != nil {
+		return nil, fmt.Errorf("no compiled bundles in %s: %w", artifacts, err)
+	}
+	var match string
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if strings.HasPrefix(name, h) {
+			if match != "" {
+				return nil, fmt.Errorf("bundle reference %q is ambiguous", ref)
+			}
+			match = e.Name()
+		}
+	}
+	if match == "" {
+		return nil, fmt.Errorf("bundle %q not found in %s", ref, BundlesDir(artifacts))
+	}
+	var pl manifest.PlatformLock
+	if err := manifest.ReadJSON(filepath.Join(BundlesDir(artifacts), match), &pl); err != nil {
+		return nil, err
+	}
+	if got := pl.ComputeDigest(); got != pl.BundleDigest {
+		return nil, fmt.Errorf("bundle %s is corrupt: content digest %s", pl.BundleDigest, got)
+	}
+	return &pl, nil
 }
 
 // Build runs the artifact builder and writes bundle.lock.json.
@@ -80,9 +171,19 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 		lock.Platforms[p.String()] = pl
+		// every compiled bundle stays addressable by digest, so configs can
+		// be switched (or shipped) without rebuilding
+		if err := manifest.WriteJSON(BundlePath(opts.Artifacts, pl.BundleDigest), pl); err != nil {
+			return nil, err
+		}
 	}
 	if err := manifest.WriteJSON(LockPath(opts.Artifacts), lock); err != nil {
 		return nil, err
+	}
+	if cfg.Hash != "" {
+		if err := recordConfig(opts.Artifacts, cfg, lock); err != nil {
+			return nil, err
+		}
 	}
 	return lock, nil
 }
@@ -400,6 +501,9 @@ func (b *Builder) resolveProcess(pl *manifest.PlatformLock, base *BaseManifest) 
 		}
 	}
 	pl.Process = proc
+	if r := pc.Ready; r != nil {
+		pl.Ready = &manifest.Ready{TCP: r.TCP, Exec: r.Exec, Log: r.Log, Timeout: r.Timeout}
+	}
 	return nil
 }
 

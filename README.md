@@ -127,6 +127,61 @@ $ bin/oar vm start --backend vz --cpus 4 --memory 4096
 $ bin/oar vm status
 ```
 
+## Switching pre-compiled configurations
+
+Every build stores the compiled bundle immutably as `artifacts/manifests/bundles/<digest>.json`.
+Switching a running service to another compiled configuration therefore needs neither the config
+file, nor go/nix/docker, nor the network:
+
+```console
+$ oar bundles                                   # compiled bundles in ./artifacts
+$ oar --bundle 458248f55e03 run --name svc      # digest or unique prefix
+$ oar --bundle ce402cfd5905 reload --name svc   # switch, ~100 ms
+```
+
+To ship precompiled caches, copy the `artifacts/` directory (or a subset of its tarballs plus
+`manifests/bundles/<digest>.json`) to the target machine. `oar warm` uploads only the store paths the
+guest does not already have. Measured on a fresh host with a cold guest cache:
+
+| step | time |
+|---|---|
+| warm the full 636 MiB bundle | 1.8 s |
+| warm a second bundle that only adds `nix:jq` | 8 ms (3 store paths) |
+| first `run` | 150 ms |
+| switch with `reload --strategy replace` | 100 ms |
+
+`reload` supports two strategies:
+
+| strategy | sequence | client impact |
+|---|---|---|
+| `overlap` (default) | start new → wait until ready → stop old | no gap if the service binds with `SO_REUSEPORT` |
+| `replace` | `runc create` new (not yet exec'd) → stop old → `runc start` new → wait until ready | gap = old exit + new startup (~45 ms for `my-agent`) |
+
+`process.ready` defines when a new instance counts as serving. With `overlap`, a new instance that
+never becomes ready (or exits) is destroyed and the old one keeps running, so the switch is
+atomic. The old instance is cleaned up in the background after the switch.
+
+```yaml
+process:
+  command: ["/opt/my-agent"]
+  ready:
+    log: "my-agent: serving on"   # or tcp: 127.0.0.1:8080, or exec: [curl, -f, http://127.0.0.1:8080/health]
+    timeout: 10s
+```
+
+With `SO_REUSEPORT`, prefer a `log` or `exec` check: a `tcp` check is also answered by the old instance.
+
+`hack/switch-bench.sh` measures all of this. A prober container polls the service every 5 ms during
+repeated switches. Results on native Linux:
+
+| strategy | switch (CLI, wall) | failed requests (6 switches, ~900 total) | max gap between responses |
+|---|---|---|---|
+| overlap + SO_REUSEPORT | 115–155 ms | 1 | 12 ms |
+| replace | 110–155 ms | 35 | 51 ms |
+
+The one failure under `overlap` is a connection queued on the old listener when it closes, a known
+SO_REUSEPORT limitation. Avoiding it needs a graceful drain in the application.
+
 ## Configuration reference
 
 ```yaml

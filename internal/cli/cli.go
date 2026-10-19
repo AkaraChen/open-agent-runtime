@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,6 +28,7 @@ type globalOpts struct {
 	vmName     string
 	jsonOut    bool
 	home       string
+	bundle     string
 }
 
 // Main runs the CLI.
@@ -42,8 +45,9 @@ func Main(args []string) int {
 	root.PersistentFlags().StringVar(&g.artifacts, "artifacts", "", "artifacts directory (default: <config dir>/artifacts)")
 	root.PersistentFlags().StringVar(&g.vmName, "vm", "default", "guest VM name")
 	root.PersistentFlags().BoolVar(&g.jsonOut, "json", false, "machine readable output")
+	root.PersistentFlags().StringVar(&g.bundle, "bundle", "", "use a compiled bundle by digest (prefix ok) instead of building the config")
 	root.AddCommand(
-		buildCmd(g), digestCmd(g),
+		buildCmd(g), digestCmd(g), bundlesCmd(g),
 		vmCmd(g),
 		warmCmd(g), composeCmd(g),
 		runCmd(g), reloadCmd(g), stopCmd(g), rmCmd(g), psCmd(g), logsCmd(g), execCmd(g),
@@ -152,16 +156,12 @@ func digestCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			lock, err := manifest.Read(builder.LockPath(g.artifactsDir(cfg)))
-			if err != nil {
-				return err
-			}
 			if platform == "" {
 				platform = cfg.DefaultPlatform()
 			}
-			pl, ok := lock.Platforms[platform]
-			if !ok {
-				return fmt.Errorf("lock has no %s bundle; run oar build --platform %s", platform, platform)
+			pl, err := builder.BundleForConfig(g.artifactsDir(cfg), cfg, platform)
+			if err != nil {
+				return err
 			}
 			d := pl.ComputeDigest()
 			if d != pl.BundleDigest {
@@ -173,6 +173,58 @@ func digestCmd(g *globalOpts) *cobra.Command {
 	}
 	c.Flags().StringVar(&platform, "platform", "", "platform (default: runtime.platform)")
 	return c
+}
+
+func bundlesCmd(g *globalOpts) *cobra.Command {
+	return &cobra.Command{
+		Use:   "bundles",
+		Short: "List compiled bundles in the artifacts directory (usable with --bundle)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, _ := g.loadConfig()
+			dir := builder.BundlesDir(g.artifactsDir(cfg))
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return fmt.Errorf("no compiled bundles: %w", err)
+			}
+			type row struct {
+				Digest     string    `json:"bundleDigest"`
+				Platform   string    `json:"platform"`
+				Packages   []string  `json:"packages"`
+				Components []string  `json:"components"`
+				Command    []string  `json:"command"`
+				Built      time.Time `json:"built"`
+			}
+			var rows []row
+			for _, e := range entries {
+				var pl manifest.PlatformLock
+				if manifest.ReadJSON(filepath.Join(dir, e.Name()), &pl) != nil {
+					continue
+				}
+				r := row{Digest: pl.BundleDigest, Platform: pl.Platform, Command: pl.Process.Args}
+				if info, err := e.Info(); err == nil {
+					r.Built = info.ModTime()
+				}
+				for _, p := range pl.Packages {
+					r.Packages = append(r.Packages, p.Attr)
+				}
+				for _, c := range pl.Components {
+					r.Components = append(r.Components, c.Kind+":"+c.Name)
+				}
+				rows = append(rows, r)
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].Built.After(rows[j].Built) })
+			g.print(rows, func() {
+				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+				fmt.Fprintln(tw, "BUNDLE\tPLATFORM\tPACKAGES\tCOMPONENTS\tBUILT")
+				for _, r := range rows {
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", shortKey(r.Digest), r.Platform,
+						strings.Join(r.Packages, ","), strings.Join(r.Components, ","), r.Built.Local().Format(time.DateTime))
+				}
+				tw.Flush()
+			})
+			return nil
+		},
+	}
 }
 
 func logWriter(g *globalOpts) *os.File {

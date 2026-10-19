@@ -79,6 +79,8 @@ jobs:
       - run: hack/build.sh
       - run: which runc && runc --version
       - run: BACKEND=native hack/e2e.sh
+      - name: config switch benchmark
+        run: BACKEND=native hack/switch-bench.sh 6
 
   e2e-linux-kvm:
     name: e2e linux kvm (resident QEMU/KVM guest)
@@ -103,6 +105,8 @@ jobs:
           ls -l /dev/kvm /dev/vhost-vsock
       - run: hack/build.sh
       - run: BACKEND=kvm hack/e2e.sh --cpus 2 --memory 3072
+      - name: config switch benchmark
+        run: BACKEND=kvm hack/switch-bench.sh 6 --cpus 2 --memory 3072
 
   e2e-macos:
     name: e2e macos ${{ matrix.backend }} (${{ matrix.os }})

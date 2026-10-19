@@ -2,6 +2,8 @@
 package spec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,6 +30,9 @@ type Config struct {
 	// Dir is the directory containing the config file; relative paths in
 	// sources are resolved against it.
 	Dir string `yaml:"-"`
+	// Hash identifies the config content ("sha256:..."); it maps a config
+	// file to the bundles compiled from it.
+	Hash string `yaml:"-"`
 }
 
 // Runtime selects the base image and target platforms.
@@ -73,6 +79,16 @@ type Process struct {
 	Env     map[string]string `yaml:"env"`
 	Cwd     string            `yaml:"cwd"`
 	User    string            `yaml:"user"`
+	Ready   *Ready            `yaml:"ready"`
+}
+
+// Ready is a readiness check. run/reload wait for it; reload only retires
+// the old instance once the new one is ready (and rolls back otherwise).
+type Ready struct {
+	TCP     string        `yaml:"tcp"`  // host:port that must accept connections
+	Exec    []string      `yaml:"exec"` // command run in the container, exit 0
+	Log     string        `yaml:"log"`  // substring of the container output
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Kind of a component reference.
@@ -163,6 +179,8 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	c.Dir = filepath.Dir(abs)
+	sum := sha256.Sum256(data)
+	c.Hash = "sha256:" + hex.EncodeToString(sum[:])
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -182,6 +200,17 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Process.Command) == 0 {
 		return fmt.Errorf("process.command is required")
+	}
+	if r := c.Process.Ready; r != nil {
+		n := 0
+		for _, set := range []bool{r.TCP != "", len(r.Exec) > 0, r.Log != ""} {
+			if set {
+				n++
+			}
+		}
+		if n != 1 {
+			return fmt.Errorf("process.ready needs exactly one of tcp, exec or log")
+		}
 	}
 	for _, p := range c.AllPlatforms() {
 		if _, err := ParsePlatform(p); err != nil {
