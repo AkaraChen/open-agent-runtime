@@ -48,14 +48,14 @@ func evalKey(rev, system, attr string) string { return rev + "/" + system + "/" 
 // evalPackages resolves attribute names to output store paths. Results are
 // cached in artifacts/manifests/nix-eval.json; nix is only invoked for
 // attributes that were never evaluated at this revision.
-func (b *Builder) evalPackages(p spec.Platform, attrs []string) (map[string]evalResult, error) {
+func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map[string]evalResult, error) {
 	cachePath := filepath.Join(b.opts.Artifacts, "manifests", "nix-eval.json")
 	var cache evalCache
 	_ = manifest.ReadJSON(cachePath, &cache)
 	if cache.Entries == nil {
 		cache.Entries = map[string]evalResult{}
 	}
-	rev, system := b.cfg.Runtime.Nixpkgs, p.NixSystem()
+	system := p.NixSystem()
 	out := map[string]evalResult{}
 	var missing []string
 	for _, a := range attrs {

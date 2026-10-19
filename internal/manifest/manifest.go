@@ -52,6 +52,7 @@ type Base struct {
 // Package is a top-level nix package requested by a component reference.
 type Package struct {
 	Attr    string            `json:"attr"`
+	Nixpkgs string            `json:"nixpkgs,omitempty"` // revision it was evaluated at
 	OutPath string            `json:"outPath"`
 	System  string            `json:"system"`
 	Bins    []string          `json:"bins"`
@@ -151,7 +152,12 @@ func sortRows(rows [][]string) {
 
 // Normalize sorts every collection in canonical order.
 func (p *PlatformLock) Normalize() {
-	sort.Slice(p.Packages, func(i, j int) bool { return p.Packages[i].Attr < p.Packages[j].Attr })
+	sort.Slice(p.Packages, func(i, j int) bool {
+		if p.Packages[i].Attr != p.Packages[j].Attr {
+			return p.Packages[i].Attr < p.Packages[j].Attr
+		}
+		return p.Packages[i].Nixpkgs < p.Packages[j].Nixpkgs
+	})
 	sort.Slice(p.StorePaths, func(i, j int) bool { return p.StorePaths[i].Path < p.StorePaths[j].Path })
 	sort.Slice(p.Components, func(i, j int) bool {
 		return p.Components[i].Kind+":"+p.Components[i].Name < p.Components[j].Kind+":"+p.Components[j].Name

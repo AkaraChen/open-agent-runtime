@@ -134,11 +134,12 @@ runtime:
   base: debian:trixie-slim        # or debian:trixie-slim@sha256:...
   platform: linux/arm64           # default platform
   platforms: [linux/amd64, linux/arm64]
-  nixpkgs: 8ce73368d1ef...        # pinned revision (default: nixos-26.05 pin)
+  nixpkgs: 8ce73368d1efd4d657e9064d29b144a52046b4e8   # full commit hash (default: nixos-26.05 pin)
   hostname: oar
 
 components:                       # unordered set
-  - nix:<attr.path>               # any nixpkgs attribute
+  - nix:<attr.path>               # any nixpkgs attribute, at runtime.nixpkgs
+  - nix:<attr.path>@<commit>      # pinned to its own nixpkgs revision
   - binary:<name>                 # single executable  (default target /opt/<name>)
   - file:<name>                   # single file
   - dir:<name>                    # directory tree
@@ -155,12 +156,27 @@ sources:
     requires: [nix:git]
     override: false
 
+  app-config:                     # inline content instead of path
+    target: /etc/app/config.json  # (file: and binary: only; written verbatim)
+    content: |
+      {"listen": ":8080"}
+
 process:
   command: ["/opt/my-agent"]
   env: {KEY: value}
   cwd: /
   user: "0:0"
 ```
+
+The rules for nixpkgs revisions:
+
+- A revision must be a full commit hash. Branch names and tags move over time, so they are rejected.
+- Each package is evaluated at its own revision, and that revision is recorded in
+  `bundle.lock.json` (`packages[].nixpkgs`).
+- If the same attribute is pinned at two revisions and both provide the same binaries, the build fails
+  with a PATH conflict.
+
+`examples/inline-content` combines a per-package pin with inline files.
 
 ## Testing
 

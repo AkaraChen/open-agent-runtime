@@ -1,0 +1,30 @@
+# Pinned nixpkgs revisions and files written inline in the config.
+runtime:
+  base: debian:trixie-slim
+  # global nixpkgs pin (full commit hash; nixos-26.05)
+  nixpkgs: 8ce73368d1efd4d657e9064d29b144a52046b4e8
+
+components:
+  - nix:python313
+  # a single package can be pinned to another revision (nixos-25.11)
+  - nix:hello@b6018f87da91d19d0ab4cf979885689b469cdd41
+  - file:app-config
+  - binary:entrypoint
+
+sources:
+  app-config:
+    target: /etc/app/config.json
+    content: |
+      {"greeting": "hello from inline content"}
+  entrypoint:
+    target: /usr/local/bin/entrypoint
+    content: |
+      #!/bin/sh
+      echo "config: $(cat /etc/app/config.json)"
+      echo "hello:  $(hello --version | head -1)"
+      echo "python: $(python3 --version)"
+      trap 'echo "entrypoint: stopping"; exit 0' TERM
+      while :; do sleep 1; done
+
+process:
+  command: ["/usr/local/bin/entrypoint"]

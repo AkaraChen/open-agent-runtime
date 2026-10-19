@@ -73,3 +73,52 @@ func TestPlatform(t *testing.T) {
 		t.Fatal("expand")
 	}
 }
+
+const otherRev = "b6018f87da91d19d0ab4cf979885689b469cdd41"
+
+func TestNixRevisionPin(t *testing.T) {
+	r, err := ParseRef("nix:nodejs_22@" + otherRev)
+	if err != nil || r.Name != "nodejs_22" || r.Rev != otherRev || r.String() != "nix:nodejs_22@"+otherRev {
+		t.Fatalf("%+v %v", r, err)
+	}
+	c := cfgWith([]string{"nix:git", "nix:nodejs_22@" + otherRev})
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.NixRevision(r) != otherRev || c.NixRevision(Ref{Kind: KindNix, Name: "git"}) != DefaultNixpkgsRevision {
+		t.Fatal("NixRevision")
+	}
+	for _, bad := range []string{"nix:git@nixos-unstable", "nix:git@abc123", "nix:@" + otherRev, "binary:my-agent@" + otherRev} {
+		if _, err := ParseRef(bad); err == nil {
+			t.Fatalf("expected error for %q", bad)
+		}
+	}
+	c = cfgWith([]string{"nix:git"})
+	c.Runtime.Nixpkgs = "nixos-26.05"
+	if err := c.Validate(); err == nil {
+		t.Fatal("branch name accepted as runtime.nixpkgs")
+	}
+}
+
+func TestInlineContentValidation(t *testing.T) {
+	content := "hello\n"
+	c := cfgWith([]string{"file:conf"})
+	c.Sources["conf"] = &Source{Content: &content, Target: "/etc/x"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Sources["conf"] = &Source{Content: &content, Path: "x"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("path+content accepted")
+	}
+	c = cfgWith([]string{"dir:conf"})
+	c.Sources["conf"] = &Source{Content: &content}
+	if err := c.Validate(); err == nil {
+		t.Fatal("dir with content accepted")
+	}
+	c = cfgWith([]string{"file:conf"})
+	c.Sources["conf"] = &Source{}
+	if err := c.Validate(); err == nil {
+		t.Fatal("source without path or content accepted")
+	}
+}

@@ -53,13 +53,18 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 	if err := b.runSourceBuild(ref.Name, src, p); err != nil {
 		return nil, err
 	}
-	srcPath := spec.Expand(src.Path, p)
-	if !filepath.IsAbs(srcPath) {
-		srcPath = filepath.Join(b.cfg.Dir, srcPath)
-	}
-	st, err := os.Stat(srcPath)
-	if err != nil {
-		return nil, fmt.Errorf("component %s: %w", ref, err)
+	inline := src.Content != nil
+	var srcPath string
+	var st os.FileInfo
+	var err error
+	if !inline {
+		srcPath = spec.Expand(src.Path, p)
+		if !filepath.IsAbs(srcPath) {
+			srcPath = filepath.Join(b.cfg.Dir, srcPath)
+		}
+		if st, err = os.Stat(srcPath); err != nil {
+			return nil, fmt.Errorf("component %s: %w", ref, err)
+		}
 	}
 	target := src.Target
 	if target == "" {
@@ -69,12 +74,13 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 		return nil, fmt.Errorf("component %s: target %q must be absolute", ref, target)
 	}
 	target = path.Clean(target)
-	switch ref.Kind {
-	case spec.KindBinary, spec.KindFile:
+	switch {
+	case inline:
+	case ref.Kind == spec.KindBinary || ref.Kind == spec.KindFile:
 		if st.IsDir() {
 			return nil, fmt.Errorf("component %s: %s is a directory (use dir:)", ref, srcPath)
 		}
-	case spec.KindDir:
+	case ref.Kind == spec.KindDir:
 		if !st.IsDir() {
 			return nil, fmt.Errorf("component %s: %s is not a directory", ref, srcPath)
 		}
@@ -145,7 +151,7 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 				return err
 			}
 			c.Files = append(c.Files, name)
-			if ei, ok := inspectELF(abs); ok {
+			if ei, ok := inspectELF(f); ok {
 				ei.Path = "/" + name
 				c.ELF = append(c.ELF, ei)
 			}
@@ -185,6 +191,24 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 				return nil, err
 			}
 		}
+	} else if inline {
+		if fileMode == 0 {
+			fileMode = 0o644
+		}
+		data := []byte(*src.Content)
+		name := strings.TrimPrefix(target, "/")
+		hdr := &tar.Header{Typeflag: tar.TypeReg, Name: name, Mode: fileMode, Size: int64(len(data)), ModTime: nar.Epoch, Format: tar.FormatPAX}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return nil, err
+		}
+		c.Files = append(c.Files, name)
+		if ei, ok := inspectELF(bytes.NewReader(data)); ok {
+			ei.Path = target
+			c.ELF = append(c.ELF, ei)
+		}
 	} else if err := addFile(target, srcPath, fileMode); err != nil {
 		return nil, err
 	}
@@ -219,12 +243,11 @@ func writeDir(tw *tar.Writer, name string, mode int64) error {
 	})
 }
 
-func inspectELF(p string) (manifest.ELFInfo, bool) {
-	f, err := elf.Open(p)
+func inspectELF(r io.ReaderAt) (manifest.ELFInfo, bool) {
+	f, err := elf.NewFile(r)
 	if err != nil {
 		return manifest.ELFInfo{}, false
 	}
-	defer f.Close()
 	ei := manifest.ELFInfo{Machine: elfMachine(f.Machine), Static: true}
 	for _, prog := range f.Progs {
 		if prog.Type == elf.PT_INTERP {

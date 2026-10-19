@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"archive/tar"
 	"context"
 	"io"
 	"os"
@@ -82,5 +83,56 @@ func TestImportBinaryELF(t *testing.T) {
 	}
 	if len(c.ELF) != 1 || c.ELF[0].Machine != "arm64" || !c.ELF[0].Static || c.Target != "/opt/hello" {
 		t.Fatalf("elf %+v target %s", c.ELF, c.Target)
+	}
+}
+
+func TestImportInlineContent(t *testing.T) {
+	cfg := "{\"listen\": \":8080\"}\n"
+	script := "#!/bin/sh\necho hi\n"
+	b, _ := newTestBuilder(t, map[string]*spec.Source{
+		"conf":  {Content: &cfg, Target: "/etc/my-agent/config.json"},
+		"hello": {Content: &script, Target: "/usr/local/bin/hello"},
+	})
+	c, err := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "conf"}, arm64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Files[len(c.Files)-1]; got != "etc/my-agent/config.json" {
+		t.Fatalf("files %v", c.Files)
+	}
+	tarPath := filepath.Join(b.opts.Artifacts, filepath.FromSlash(c.Path))
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	modes := map[string]int64{}
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		modes[h.Name] = h.Mode
+		if h.Name == "etc/my-agent/config.json" {
+			body, _ := io.ReadAll(tr)
+			if string(body) != cfg {
+				t.Fatalf("content %q", body)
+			}
+		}
+	}
+	if modes["etc/my-agent/config.json"] != 0o644 {
+		t.Fatalf("file mode %o", modes["etc/my-agent/config.json"])
+	}
+	again, _ := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "conf"}, arm64)
+	if again.Key != c.Key {
+		t.Fatal("inline content key not deterministic")
+	}
+	h, err := b.buildComponent(spec.Ref{Kind: spec.KindBinary, Name: "hello"}, arm64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Target != "/usr/local/bin/hello" || len(h.ELF) != 0 {
+		t.Fatalf("%+v", h)
 	}
 }

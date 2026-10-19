@@ -109,30 +109,41 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 		pl.Hostname = "oar"
 	}
 
-	// Nix packages
-	var attrs []string
+	// Nix packages, evaluated once per nixpkgs revision
+	var nixRefs []spec.Ref
+	byRev := map[string][]string{}
 	for _, r := range refs {
 		if r.Kind == spec.KindNix {
-			attrs = append(attrs, r.Name)
+			nixRefs = append(nixRefs, r)
+			rev := b.cfg.NixRevision(r)
+			byRev[rev] = append(byRev[rev], r.Name)
 		}
 	}
 	var storeIndex map[string]*storeMeta
-	if len(attrs) > 0 {
-		evals, err := b.evalPackages(p, attrs)
-		if err != nil {
-			return nil, err
+	if len(nixRefs) > 0 {
+		evals := map[string]evalResult{} // keyed by rev + "/" + attr
+		for _, rev := range sortedKeys(byRev) {
+			res, err := b.evalPackages(p, rev, byRev[rev])
+			if err != nil {
+				return nil, err
+			}
+			for a, r := range res {
+				evals[rev+"/"+a] = r
+			}
 		}
 		var roots []string
-		for _, a := range attrs {
-			roots = append(roots, evals[a].Outputs...)
+		for _, r := range nixRefs {
+			roots = append(roots, evals[b.cfg.NixRevision(r)+"/"+r.Name].Outputs...)
 		}
+		var err error
 		storeIndex, err = b.fetchClosure(roots)
 		if err != nil {
 			return nil, err
 		}
-		for _, a := range attrs {
-			ev := evals[a]
-			pk := manifest.Package{Attr: a, OutPath: ev.Outputs[0], System: p.NixSystem()}
+		for _, r := range nixRefs {
+			rev := b.cfg.NixRevision(r)
+			ev := evals[rev+"/"+r.Name]
+			pk := manifest.Package{Attr: r.Name, Nixpkgs: rev, OutPath: ev.Outputs[0], System: p.NixSystem()}
 			for _, o := range ev.Outputs {
 				pk.Bins = append(pk.Bins, storeIndex[path.Base(o)].Bins...)
 			}
@@ -250,16 +261,22 @@ func checkConflicts(pl *manifest.PlatformLock, base *BaseManifest, store map[str
 
 	// 3. binaries on PATH from different nix packages
 	binOwner := map[string]string{}
+	label := func(pk manifest.Package) string {
+		if pk.Nixpkgs != "" {
+			return "nix:" + pk.Attr + "@" + pk.Nixpkgs[:min(12, len(pk.Nixpkgs))]
+		}
+		return "nix:" + pk.Attr
+	}
 	for _, pk := range pl.Packages {
 		for _, bin := range pk.Bins {
 			if prev, ok := binOwner[bin]; ok {
-				errs = append(errs, fmt.Sprintf("PATH conflict: %q is provided by both nix:%s and nix:%s", bin, prev, pk.Attr))
+				errs = append(errs, fmt.Sprintf("PATH conflict: %q is provided by both %s and %s", bin, prev, label(pk)))
 				continue
 			}
-			binOwner[bin] = pk.Attr
+			binOwner[bin] = label(pk)
 			for _, d := range []string{"usr/local/bin", "usr/bin", "bin", "usr/sbin", "sbin"} {
 				if _, ok := base.Entries[d+"/"+bin]; ok {
-					warnings = append(warnings, fmt.Sprintf("nix:%s/bin/%s shadows /%s/%s from the base (nix packages precede the base on PATH)", pk.Attr, bin, d, bin))
+					warnings = append(warnings, fmt.Sprintf("%s/bin/%s shadows /%s/%s from the base (nix packages precede the base on PATH)", label(pk), bin, d, bin))
 					break
 				}
 			}
@@ -282,6 +299,15 @@ func checkConflicts(pl *manifest.PlatformLock, base *BaseManifest, store map[str
 		return nil, fmt.Errorf("conflicts detected:\n  %s", strings.Join(errs, "\n  "))
 	}
 	return warnings, nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func baseHasLib(base *BaseManifest, lib string) bool {
