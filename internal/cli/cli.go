@@ -144,7 +144,7 @@ func printDigests(lock *manifest.Lock, only []string) {
 
 func digestCmd(g *globalOpts) *cobra.Command {
 	var platform string
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "digest",
 		Short: "Print the bundle digest from the lock (recomputed from content)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -171,6 +171,8 @@ func digestCmd(g *globalOpts) *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().StringVar(&platform, "platform", "", "platform (default: runtime.platform)")
+	return c
 }
 
 func logWriter(g *globalOpts) *os.File {

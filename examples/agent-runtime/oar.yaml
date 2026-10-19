@@ -15,7 +15,7 @@ sources:
   my-agent:
     path: "dist/my-agent-{{arch}}"
     target: /opt/my-agent
-    build: [go, build, -trimpath, "-ldflags=-s -w", -o, "dist/my-agent-{{arch}}", ./my-agent]
+    build: [go, build, -trimpath, -buildvcs=false, "-ldflags=-s -w", -o, "dist/my-agent-{{arch}}", ./my-agent]
     build_env: {GOOS: linux, GOARCH: "{{arch}}", CGO_ENABLED: "0"}
 
 process:

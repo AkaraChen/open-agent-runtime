@@ -33,6 +33,7 @@ func RunInit() {
 		unix.Dup2(int(console.Fd()), 1)
 		unix.Dup2(int(console.Fd()), 2)
 	}
+	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	logInit("booting guest (agent %s)", Version)
 	mounts := []struct {
 		src, dst, typ string

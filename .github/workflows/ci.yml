@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go vet ./...
+      - run: go test ./...
+      - name: cross-compile
+        shell: bash
+        run: |
+          for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64 darwin/amd64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/oar
+          done
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/oar-agent
+      - name: build with Virtualization.framework
+        if: runner.os == 'macOS'
+        run: hack/build.sh
+
+  guest:
+    name: guest image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: kernel cache
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: guest/out/${{ matrix.arch }}/kernel*
+          key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
+      - name: build kernel
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: guest/build.sh ${{ matrix.arch }} kernel
+      - name: build initramfs
+        run: guest/build.sh ${{ matrix.arch }} initramfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}
+          path: guest/out/${{ matrix.arch }}/
+          retention-days: 7
+
+  e2e-linux-native:
+    name: e2e linux native (runc on host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: hack/build.sh
+      - run: which runc && runc --version
+      - run: BACKEND=native hack/e2e.sh
+
+  e2e-linux-kvm:
+    name: e2e linux kvm (resident QEMU/KVM guest)
+    needs: guest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-amd64
+          path: guest/out/amd64
+      - name: enable kvm and vhost-vsock
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock
+          sudo chmod 666 /dev/vhost-vsock
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+          ls -l /dev/kvm /dev/vhost-vsock
+      - run: hack/build.sh
+      - run: BACKEND=kvm hack/e2e.sh --cpus 2 --memory 3072
+
+  e2e-macos:
+    name: e2e macos ${{ matrix.backend }} (${{ matrix.os }})
+    needs: guest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, arch: arm64, backend: vz }
+          - { os: macos-15-intel, arch: amd64, backend: vz }
+          - { os: macos-15, arch: arm64, backend: qemu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}
+          path: guest/out/${{ matrix.arch }}
+      - name: host info
+        run: |
+          sw_vers; uname -m; sysctl -n machdep.cpu.brand_string || true
+          sysctl kern.hv_support || true
+      - if: matrix.backend == 'qemu'
+        run: brew install qemu
+      - run: hack/build.sh
+      - run: bin/oar vm backends
+      - run: BACKEND=${{ matrix.backend }} hack/e2e.sh --cpus 3 --memory 4096
