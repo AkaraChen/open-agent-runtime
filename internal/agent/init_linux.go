@@ -4,8 +4,8 @@ package agent
 
 import (
 	"bytes"
-	"io"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
