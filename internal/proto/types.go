@@ -1,0 +1,129 @@
+package proto
+
+import (
+	"time"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
+)
+
+// InfoResult describes the guest.
+type InfoResult struct {
+	AgentVersion string `json:"agentVersion"`
+	Protocol     int    `json:"protocol"`
+	Arch         string `json:"arch"`
+	Kernel       string `json:"kernel"`
+	Root         string `json:"root"`
+	Mode         string `json:"mode"` // vm or native
+	Runc         string `json:"runc"`
+	BootedAt     string `json:"bootedAt,omitempty"`
+	Containers   int    `json:"containers"`
+}
+
+// Artifact kinds stored in the guest cache.
+const (
+	KindBase      = "base"
+	KindStore     = "store"
+	KindComponent = "component"
+)
+
+// WarmItem identifies one immutable artifact.
+type WarmItem struct {
+	Kind string `json:"kind"`
+	Key  string `json:"key"`            // sha256 of the artifact tarball
+	Name string `json:"name,omitempty"` // store path basename for KindStore
+	Size int64  `json:"size,omitempty"`
+}
+
+// WarmStatusArgs asks which items are missing.
+type WarmStatusArgs struct {
+	Items []WarmItem `json:"items"`
+}
+
+// WarmStatusResult lists missing items.
+type WarmStatusResult struct {
+	Missing []WarmItem `json:"missing"`
+}
+
+// WarmPutArgs precedes a tarball body.
+type WarmPutArgs struct {
+	Item WarmItem `json:"item"`
+}
+
+// ComposeArgs composes a bundle from a platform lock.
+type ComposeArgs struct {
+	Lock *manifest.PlatformLock `json:"lock"`
+}
+
+// ComposeResult reports the composed bundle.
+type ComposeResult struct {
+	BundleDigest string        `json:"bundleDigest"`
+	Cached       bool          `json:"cached"`
+	Duration     time.Duration `json:"duration"`
+	Layers       []string      `json:"layers"`
+}
+
+// RunArgs composes and starts a container.
+type RunArgs struct {
+	Name string                 `json:"name"`
+	Lock *manifest.PlatformLock `json:"lock"`
+}
+
+// Timings of a run, all measured inside the guest.
+type Timings struct {
+	Compose     time.Duration `json:"compose"`
+	Instantiate time.Duration `json:"instantiate"`
+	Create      time.Duration `json:"create"`
+	Start       time.Duration `json:"start"`
+	Total       time.Duration `json:"total"`
+}
+
+// RunResult describes a started container.
+type RunResult struct {
+	Container Container `json:"container"`
+	Cached    bool      `json:"cached"`
+	Timings   Timings   `json:"timings"`
+	Replaced  string    `json:"replaced,omitempty"`
+}
+
+// NameArgs addresses a container by name.
+type NameArgs struct {
+	Name    string        `json:"name"`
+	Timeout time.Duration `json:"timeout,omitempty"`
+	Force   bool          `json:"force,omitempty"`
+}
+
+// LogsArgs requests container logs.
+type LogsArgs struct {
+	Name   string `json:"name"`
+	Follow bool   `json:"follow,omitempty"`
+}
+
+// ExecArgs runs a command in a container.
+type ExecArgs struct {
+	Name string   `json:"name"`
+	Args []string `json:"args"`
+	Env  []string `json:"env,omitempty"`
+}
+
+// ExecResult carries the outcome of an exec.
+type ExecResult struct {
+	ExitCode int    `json:"exitCode"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+}
+
+// Container is the observable state of a managed container.
+type Container struct {
+	Name         string    `json:"name"`
+	ID           string    `json:"id"`
+	BundleDigest string    `json:"bundleDigest"`
+	Status       string    `json:"status"` // created, running, stopped, unknown
+	Pid          int       `json:"pid,omitempty"`
+	Created      time.Time `json:"created"`
+	Bundle       string    `json:"bundle"`
+}
+
+// ListResult lists containers.
+type ListResult struct {
+	Containers []Container `json:"containers"`
+}

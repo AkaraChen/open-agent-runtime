@@ -1,0 +1,22 @@
+# Debian Slim + 3 Nix packages + 1 custom binary.
+runtime:
+  base: debian:trixie-slim
+  platform: linux/arm64
+  # artifacts are built for both; `oar run` picks the guest's architecture
+  platforms: [linux/amd64, linux/arm64]
+
+components:
+  - nix:nodejs_22
+  - nix:python313
+  - nix:git
+  - binary:my-agent
+
+sources:
+  my-agent:
+    path: "dist/my-agent-{{arch}}"
+    target: /opt/my-agent
+    build: [go, build, -trimpath, "-ldflags=-s -w", -o, "dist/my-agent-{{arch}}", ./my-agent]
+    build_env: {GOOS: linux, GOARCH: "{{arch}}", CGO_ENABLED: "0"}
+
+process:
+  command: ["/opt/my-agent"]

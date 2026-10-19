@@ -1,0 +1,4 @@
+/bin/
+/guest/out/
+/guest/.cache/
+*.tmp
