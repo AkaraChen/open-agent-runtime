@@ -97,15 +97,26 @@ func (c *Client) CallBody(ctx context.Context, op string, args any, body io.Read
 	if _, err := w.Write(append(hdr, '\n')); err != nil {
 		return err
 	}
+	r := bufio.NewReaderSize(conn, 64<<10)
+	sendErr := func(err error) error {
+		// the agent may have rejected the request early; prefer its reason
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if line, rerr := r.ReadBytes('\n'); rerr == nil {
+			var resp Response
+			if json.Unmarshal(line, &resp) == nil && !resp.OK && resp.Error != "" {
+				return &RemoteError{Msg: resp.Error}
+			}
+		}
+		return err
+	}
 	if body != nil && size > 0 {
 		if _, err := io.CopyN(w, body, size); err != nil {
-			return fmt.Errorf("send body: %w", err)
+			return sendErr(fmt.Errorf("send body: %w", err))
 		}
 	}
 	if err := w.Flush(); err != nil {
-		return err
+		return sendErr(err)
 	}
-	r := bufio.NewReaderSize(conn, 64<<10)
 	line, err := r.ReadBytes('\n')
 	if err != nil {
 		if ctx.Err() != nil {

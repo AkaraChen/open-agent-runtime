@@ -70,8 +70,17 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// Handle dispatches a request.
+// Handle dispatches a request and logs failures to the agent's stderr
+// (the guest console).
 func (s *Server) Handle(ctx context.Context, req *proto.Request, body io.Reader, rs *proto.ResponseStream) (any, error) {
+	res, err := s.handle(ctx, req, body, rs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oar-agent: %s failed: %v\n", req.Op, err)
+	}
+	return res, err
+}
+
+func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader, rs *proto.ResponseStream) (any, error) {
 	switch req.Op {
 	case proto.OpInfo:
 		return s.info(), nil

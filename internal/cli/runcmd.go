@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -134,17 +135,12 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 		it := it
 		eg.Go(func() error {
 			p := paths[it.Kind+"|"+it.Key+"|"+it.Name]
-			f, err := os.Open(p)
+			fi, err := os.Stat(p)
 			if err != nil {
 				return fmt.Errorf("artifact %s missing locally (%w); run oar build", p, err)
 			}
-			defer f.Close()
-			fi, err := f.Stat()
-			if err != nil {
-				return err
-			}
-			if err := s.client.CallBody(ectx, proto.OpWarmPut, proto.WarmPutArgs{Item: it}, f, fi.Size(), nil, nil); err != nil {
-				return fmt.Errorf("warm %s %s: %w", it.Kind, it.Name, err)
+			if err := s.putWithRetry(ectx, it, p); err != nil {
+				return fmt.Errorf("warm %s %s: %w", it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), err)
 			}
 			n := sent.Add(fi.Size())
 			if verbose {
@@ -161,6 +157,32 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	stats.Bytes = sent.Load()
 	stats.Duration = time.Since(start)
 	return stats, nil
+}
+
+// putWithRetry uploads one artifact, retrying transport failures. Errors
+// reported by the agent itself (e.g. checksum mismatch) are not retried.
+func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string) error {
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		err = func() error {
+			f, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			fi, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it}, f, fi.Size(), nil, nil)
+		}()
+		var re *proto.RemoteError
+		if err == nil || errors.As(err, &re) || ctx.Err() != nil {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+	}
+	return err
 }
 
 func firstNonEmpty(a, b string) string {

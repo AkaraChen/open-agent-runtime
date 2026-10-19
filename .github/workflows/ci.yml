@@ -117,10 +117,7 @@ jobs:
           # VZ must be reported unavailable, the resident guest runs on QEMU
           - { os: macos-15, arch: arm64, backend: vz, expect: unavailable }
           - { os: macos-15, arch: arm64, backend: qemu }
-          # newer runner images may support nested virtualization
-          - { os: macos-26, arch: arm64, backend: vz, experimental: true }
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
