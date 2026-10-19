@@ -32,6 +32,8 @@ type Builder struct {
 	cfg  *spec.Config
 	opts Options
 	prev *manifest.Lock
+	// fetched counts store paths downloaded during this build
+	fetched int
 }
 
 // LockPath returns the lock location inside an artifacts dir.
@@ -124,7 +126,6 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 		for _, a := range attrs {
 			roots = append(roots, evals[a].Outputs...)
 		}
-		b.logf("fetching runtime closure of %d packages for %s", len(attrs), p)
 		storeIndex, err = b.fetchClosure(roots)
 		if err != nil {
 			return nil, err
@@ -143,7 +144,9 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 			pl.StorePaths = append(pl.StorePaths, m.StorePath)
 			total += m.Size
 		}
-		b.logf("closure for %s: %d store paths, %s", p, len(storeIndex), humanSize(total))
+		if b.fetched > 0 {
+			b.logf("closure for %s: %d store paths, %s (%d fetched)", p, len(storeIndex), humanSize(total), b.fetched)
+		}
 	}
 
 	// Imported components

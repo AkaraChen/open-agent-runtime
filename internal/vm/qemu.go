@@ -142,7 +142,7 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 			"-serial", "file:" + cfg.ConsoleLog,
 			"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=writeback",
 			"-device", "virtio-blk-pci,drive=data",
-			"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0",
+			"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0,romfile=",
 			"-device", "virtio-rng-pci",
 			"-monitor", "none",
 		}

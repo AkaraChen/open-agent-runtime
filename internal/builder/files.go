@@ -32,7 +32,6 @@ func (b *Builder) runSourceBuild(name string, src *spec.Source, p spec.Platform)
 	for i, a := range src.Build {
 		args[i] = spec.Expand(a, p)
 	}
-	b.logf("building source %s for %s: %s", name, p, strings.Join(args, " "))
 	cmd := exec.CommandContext(b.ctx, args[0], args[1:]...)
 	cmd.Dir = b.cfg.Dir
 	cmd.Env = append(os.Environ(), "OAR_ARCH="+p.Arch, "OAR_OS="+p.OS, "OAR_PLATFORM="+p.String())
@@ -203,10 +202,13 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 	c.Size = cw.n
 	c.Path = filepath.ToSlash(filepath.Join("components", ref.Name, p.Slug(), "tree.tar"))
 	sort.Strings(c.Files)
+	var prev manifest.Component
+	if manifest.ReadJSON(filepath.Join(dir, "manifest.json"), &prev) != nil || prev.Key != c.Key {
+		b.logf("component %s (%s): %d entries, %s", ref, p, len(c.Files), humanSize(c.Size))
+	}
 	if err := manifest.WriteJSON(filepath.Join(dir, "manifest.json"), c); err != nil {
 		return nil, err
 	}
-	b.logf("component %s (%s): %d entries, %s", ref, p, len(c.Files), humanSize(c.Size))
 	return c, nil
 }
 

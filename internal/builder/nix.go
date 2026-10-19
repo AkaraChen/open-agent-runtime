@@ -337,6 +337,9 @@ func (f *fetcher) fetch(base string) (*storeMeta, error) {
 	if err := manifest.WriteJSON(metaPath, m); err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	f.b.fetched++
+	f.mu.Unlock()
 	f.b.logf("  fetched %s (%s)", base, humanSize(cw.n))
 	return m, nil
 }

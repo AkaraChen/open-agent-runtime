@@ -4,6 +4,7 @@ package agent
 
 import (
 	"bytes"
+	"io"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,12 +58,13 @@ func RunInit() {
 	}
 	enableControllers()
 	unix.Sethostname([]byte("oar-guest"))
-	bringUpLoopback()
+	ifUp("lo")
 	mountData()
 	if _, err := os.Stat("/sys/class/net/eth0"); err == nil {
+		ifUp("eth0")
 		if p, err := exec.LookPath("udhcpc"); err == nil {
-			c := exec.Command(p, "-i", "eth0", "-b", "-q", "-t", "5")
-			c.Stdout, c.Stderr = os.Stderr, os.Stderr
+			c := exec.Command(p, "-i", "eth0", "-b", "-q", "-t", "10", "-s", "/usr/share/udhcpc/default.script")
+			c.Stdout, c.Stderr = io.Discard, io.Discard
 			_ = c.Start()
 		}
 	}
@@ -141,13 +143,13 @@ func enableControllers() {
 	_ = os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte(strings.Join(ctl, " ")), 0)
 }
 
-func bringUpLoopback() {
+func ifUp(name string) {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
 		return
 	}
 	defer unix.Close(fd)
-	ifr, err := unix.NewIfreq("lo")
+	ifr, err := unix.NewIfreq(name)
 	if err != nil {
 		return
 	}
