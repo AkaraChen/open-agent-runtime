@@ -322,7 +322,7 @@ func ensureVM(ctx context.Context, g *globalOpts) (*proto.Client, proto.InfoResu
 		return nil, info, err
 	}
 	if info.Protocol != proto.Version {
-		return nil, info, fmt.Errorf("guest agent speaks protocol %d, CLI speaks %d", info.Protocol, proto.Version)
+		return nil, info, fmt.Errorf("guest agent speaks protocol %d, CLI speaks %d: rebuild the guest image (guest/build.sh) and restart the VM", info.Protocol, proto.Version)
 	}
 	return c, info, nil
 }

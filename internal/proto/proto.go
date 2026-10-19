@@ -21,7 +21,7 @@ import (
 )
 
 // Version of the wire protocol.
-const Version = 1
+const Version = 2
 
 // Operation names.
 const (

@@ -388,8 +388,13 @@ func ensureVMNoStart(ctx context.Context, g *globalOpts) (*proto.Client, proto.I
 		return nil, info, fmt.Errorf("vm %q is not running", g.vmName)
 	}
 	c := vmClient(dir)
-	err := c.Call(ctx, proto.OpInfo, nil, &info)
-	return c, info, err
+	if err := c.Call(ctx, proto.OpInfo, nil, &info); err != nil {
+		return nil, info, err
+	}
+	if info.Protocol != proto.Version {
+		return nil, info, fmt.Errorf("guest agent speaks protocol %d, CLI speaks %d: rebuild the guest image (guest/build.sh) and restart the VM", info.Protocol, proto.Version)
+	}
+	return c, info, nil
 }
 
 func nameFlag(c *cobra.Command, name *string) {

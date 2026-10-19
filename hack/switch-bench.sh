@@ -137,10 +137,13 @@ bench_run() {
     t1=$(python3 -I -c 'import time; print(time.time())')
     wall=$(python3 -I -c "print(round(($t1-$t0)*1000))")
     [ "$wall" -gt "$maxwall" ] && maxwall=$wall
-    printf "  switch %d -> %s: %5s ms wall (CLI incl.) | guest: total %4s ms, compose %s ms, ready %4s ms, stop old %4s ms, downtime %s ms\n" \
+    printf "  switch %d -> %s: %5s ms wall (CLI incl.) | guest: total %4s ms, compose %s, mount %s, create %s, start %s, ready %4s ms, stop old %4s ms, downtime %s ms\n" \
       "$i" "$target" "$wall" \
       "$(echo "$out" | jq '.result.timings.total/1e6 | round')" \
       "$(echo "$out" | jq '.result.timings.compose/1e5 | round / 10')" \
+      "$(echo "$out" | jq '.result.timings.instantiate/1e5 | round / 10')" \
+      "$(echo "$out" | jq '.result.timings.create/1e6 | round')" \
+      "$(echo "$out" | jq '.result.timings.start/1e6 | round')" \
       "$(echo "$out" | jq '(.result.timings.ready // 0)/1e6 | round')" \
       "$(echo "$out" | jq '.result.timings.stopOld/1e6 | round')" \
       "$(echo "$out" | jq '(.result.timings.downtime // 0)/1e5 | round / 10')"
