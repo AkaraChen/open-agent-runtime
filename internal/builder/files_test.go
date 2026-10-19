@@ -105,7 +105,6 @@ func TestImportInlineContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
 	tr := tar.NewReader(f)
 	modes := map[string]int64{}
 	for {
@@ -121,10 +120,14 @@ func TestImportInlineContent(t *testing.T) {
 			}
 		}
 	}
+	f.Close() // Windows cannot replace an open file
 	if modes["etc/my-agent/config.json"] != 0o644 {
 		t.Fatalf("file mode %o", modes["etc/my-agent/config.json"])
 	}
-	again, _ := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "conf"}, arm64)
+	again, err := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "conf"}, arm64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if again.Key != c.Key {
 		t.Fatal("inline content key not deterministic")
 	}
