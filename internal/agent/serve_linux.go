@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mdlayher/vsock"
 
@@ -58,6 +59,9 @@ func Serve(ctx context.Context, ls []net.Listener, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// the first info call (the host's readiness probe) would otherwise
+	// exec runc --version, which is slow in emulated guests
+	go s.runcVersion()
 	s.reconcileIngress(ctx)
 	if cfg.Mode == "vm" {
 		markBoot("agentReady")
@@ -67,5 +71,22 @@ func Serve(ctx context.Context, ls []net.Listener, cfg Config) error {
 		fmt.Fprintf(os.Stderr, "oar-agent %s listening on %s (mode=%s root=%s)\n", Version, l.Addr(), cfg.Mode, cfg.Root)
 		go func(l net.Listener) { errc <- proto.Listen(ctx, l, s.Handle) }(l)
 	}
+	if addr := cmdlineParam("oar.notify"); addr != "" && cfg.Mode == "vm" {
+		go notifyReady(addr)
+	}
 	return <-errc
+}
+
+// notifyReady tells the host that the agent accepts connections, so it
+// can connect at once instead of waiting out a probe that was started
+// before the agent listened (the host only needs the connection itself).
+func notifyReady(addr string) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			c.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

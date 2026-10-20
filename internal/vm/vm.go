@@ -231,6 +231,11 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	guest := &proto.Client{Dial: m.DialAgent}
 	var info proto.InfoResult
 	deadline := time.Now().Add(5 * time.Minute)
+	var ready <-chan struct{}
+	if r, ok := m.(interface{ Ready() <-chan struct{} }); ok {
+		ready = r.Ready()
+	}
+	listening := false // the agent reported that it listens
 	for {
 		// Short attempts: before the agent listens, a vsock connect or a
 		// forwarded TCP connection can hang instead of failing, and a long
@@ -240,11 +245,38 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		if time.Since(st.Started) > 20*time.Second {
 			attempt = time.Second
 		}
+		if listening {
+			// nothing hangs any more; the first call may just be slow
+			attempt = 5 * time.Second
+		}
 		cctx, cancel := context.WithTimeout(ctx, attempt)
-		err = guest.Call(cctx, proto.OpInfo, nil, &info)
+		readied := false
+		if ready != nil {
+			// the agent's report cancels a probe that is hanging in the
+			// transport; the next one connects at once
+			stop, fired := make(chan struct{}), make(chan bool, 1)
+			go func(ready <-chan struct{}) {
+				select {
+				case <-ready:
+					cancel()
+					fired <- true
+				case <-stop:
+					fired <- false
+				}
+			}(ready)
+			err = guest.Call(cctx, proto.OpInfo, nil, &info)
+			close(stop)
+			readied = <-fired
+		} else {
+			err = guest.Call(cctx, proto.OpInfo, nil, &info)
+		}
 		cancel()
 		if err == nil {
 			break
+		}
+		if readied {
+			ready, listening = nil, true
+			continue
 		}
 		select {
 		case <-m.Done():

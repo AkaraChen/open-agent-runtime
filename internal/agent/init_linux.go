@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -80,7 +81,14 @@ func RunInit() {
 	markBoot("dataDisk")
 	if _, err := os.Stat("/sys/class/net/eth0"); err == nil {
 		ifUp("eth0")
-		if p, err := exec.LookPath("udhcpc"); err == nil {
+		if spec := cmdlineParam("oar.net"); spec != "" {
+			// a known network (QEMU user networking): configured at once,
+			// without DHCP, so the agent is reachable through port
+			// forwarding as soon as it listens
+			if err := staticNet("eth0", spec); err != nil {
+				logInit("static network %s: %v", spec, err)
+			}
+		} else if p, err := exec.LookPath("udhcpc"); err == nil {
 			c := exec.Command(p, "-i", "eth0", "-b", "-q", "-t", "10", "-s", "/usr/share/udhcpc/default.script")
 			c.Stdout, c.Stderr = io.Discard, io.Discard
 			_ = c.Start()
@@ -179,6 +187,42 @@ func ifUp(name string) {
 	}
 	ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
 	_ = unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
+}
+
+// staticNet configures name from "addr/prefix,gateway,dns".
+func staticNet(name, spec string) error {
+	parts := strings.Split(spec, ",")
+	if len(parts) != 3 {
+		return fmt.Errorf("want addr/prefix,gateway,dns")
+	}
+	ip, ipnet, err := net.ParseCIDR(parts[0])
+	if err != nil {
+		return err
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	for _, set := range []struct {
+		req  uint
+		addr net.IP
+	}{{unix.SIOCSIFADDR, ip}, {unix.SIOCSIFNETMASK, net.IP(ipnet.Mask)}} {
+		ifr, err := unix.NewIfreq(name)
+		if err != nil {
+			return err
+		}
+		if err := ifr.SetInet4Addr(set.addr.To4()); err != nil {
+			return err
+		}
+		if err := unix.IoctlIfreq(fd, set.req, ifr); err != nil {
+			return err
+		}
+	}
+	if out, err := exec.Command("ip", "route", "add", "default", "via", parts[1], "dev", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("default route: %v: %s", err, out)
+	}
+	return os.WriteFile("/etc/resolv.conf", []byte("nameserver "+parts[2]+"\n"), 0o644)
 }
 
 // mountData mounts the persistent data disk (/dev/vda), formatting it on

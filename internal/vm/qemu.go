@@ -76,6 +76,7 @@ type qemuMachine struct {
 	done    chan struct{}
 	once    sync.Once
 	err     error
+	ready   chan struct{} // closed when the guest agent reports it listens
 }
 
 func freePort() (int, error) {
@@ -106,11 +107,14 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	switch arch {
 	case "amd64":
-		// microvm (no PCI bus, minimal ACPI, qboot firmware) boots in about
-		// half the time of q35, whose PCI and ACPI enumeration dominated the
-		// kernel's boot; OAR_QEMU_MACHINE=q35 selects the PC machine
+		// microvm (no PCI bus, minimal ACPI) boots in about half the time of
+		// q35, whose PCI and ACPI enumeration dominated the kernel's boot.
+		// It has no HPET or ACPI PM timer, so the kernel needs kvm-clock to
+		// learn the TSC frequency: without KVM, a loaded host can make PIT
+		// calibration fail and the boot hang. OAR_QEMU_MACHINE overrides.
 		machine, console = "q35,accel="+accel, "ttyS0"
-		if os.Getenv("OAR_QEMU_MACHINE") != "q35" {
+		want := os.Getenv("OAR_QEMU_MACHINE")
+		if want == "microvm" || want == "" && accel == "kvm" {
 			machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
 		}
 	case "arm64":
@@ -130,6 +134,8 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
 		cmdline += " " + extra
 	}
+	// QEMU user networking always hands out the same addresses
+	cmdline += " oar.net=10.0.2.15/24,10.0.2.2,10.0.2.3"
 	netdev := "user,id=net0"
 	var transport []string
 	if useVsock {
@@ -143,6 +149,21 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		m.tcpAddr = fmt.Sprintf("127.0.0.1:%d", port)
 		netdev += fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:1024", port)
 		cmdline += " oar.tcp=1024"
+		// the agent connects back when it listens (10.0.2.2 is the host's
+		// loopback in QEMU user networking): probes through the port
+		// forward hang until it does, instead of failing
+		if l, err := net.Listen("tcp", "127.0.0.1:0"); err == nil {
+			m.ready = make(chan struct{})
+			cmdline += fmt.Sprintf(" oar.notify=10.0.2.2:%d", l.Addr().(*net.TCPAddr).Port)
+			go func() {
+				defer l.Close()
+				go func() { <-m.done; l.Close() }()
+				if c, err := l.Accept(); err == nil {
+					c.Close()
+					close(m.ready)
+				}
+			}()
+		}
 	}
 	netDevice := "virtio-net" + bus + ",netdev=net0"
 	if bus == "-pci" {
@@ -216,6 +237,10 @@ func (m *qemuMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 }
 
 func (m *qemuMachine) Done() <-chan struct{} { return m.done }
+
+// Ready is closed when the guest agent reports that it listens (nil when
+// the transport needs no report).
+func (m *qemuMachine) Ready() <-chan struct{} { return m.ready }
 
 // ExitErr describes why qemu exited (valid after Done is closed).
 func (m *qemuMachine) ExitErr() error { return m.err }
