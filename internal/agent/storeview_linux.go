@@ -29,7 +29,6 @@ type storeViews struct {
 
 type storeView struct {
 	digest string
-	paths  []string
 	used   time.Time
 }
 
@@ -50,27 +49,46 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		v.used = time.Now()
 		return nil
 	}
-	// after an agent restart the mounts may already exist
-	mounted, err := mountpointsUnder(b.StoreView)
-	if err != nil {
+	// New removed the views of a previous agent, so nothing is mounted
+	// here (reading mountinfo to check would cost more than the mounts)
+	if err := s.mountStoreView(b); err != nil {
+		unix.Unmount(b.StoreView, unix.MNT_DETACH)
 		return err
 	}
+	sv.views[b.StoreView] = &storeView{digest: b.Digest, used: time.Now()}
+	s.pruneStoreViewsLocked()
+	return nil
+}
+
+// mountStoreView makes the skeleton a mount of its own, binds the store
+// paths below it and makes the whole tree read-only with one recursive
+// mount_setattr, so building a view takes one syscall per path and
+// removing it a single detach.
+func (s *Server) mountStoreView(b *compose.Bundle) error {
+	view := b.StoreView
+	if err := unix.Mount(view, view, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("mount store view: %w", err)
+	}
 	for _, name := range b.StorePaths {
-		dst := filepath.Join(b.StoreView, name)
-		if mounted[dst] {
-			continue
-		}
-		src := s.layout.StorePath(name)
-		if err := unix.Mount(src, dst, "", unix.MS_BIND, ""); err != nil {
+		if err := unix.Mount(s.layout.StorePath(name), filepath.Join(view, name), "", unix.MS_BIND, ""); err != nil {
 			return fmt.Errorf("mount store path %s: %w", name, err)
 		}
-		flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV)
+	}
+	attr := &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV}
+	err := unix.MountSetattr(-1, view, unix.AT_RECURSIVE, attr)
+	if err != unix.ENOSYS {
+		return err
+	}
+	// kernels before 5.12: remount each mount
+	flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV)
+	for _, dst := range append([]string{view}, b.StorePaths...) {
+		if dst != view {
+			dst = filepath.Join(view, dst)
+		}
 		if err := unix.Mount("", dst, "", flags, ""); err != nil {
-			return fmt.Errorf("make store path %s read-only: %w", name, err)
+			return fmt.Errorf("make %s read-only: %w", dst, err)
 		}
 	}
-	sv.views[b.StoreView] = &storeView{digest: b.Digest, paths: b.StorePaths, used: time.Now()}
-	s.pruneStoreViewsLocked()
 	return nil
 }
 
@@ -104,9 +122,7 @@ func (s *Server) pruneStoreViewsLocked() {
 		if len(sv.views) <= maxStoreViews {
 			return
 		}
-		for _, name := range c.v.paths {
-			unix.Unmount(filepath.Join(c.dir, name), unix.MNT_DETACH)
-		}
+		unix.Unmount(c.dir, unix.MNT_DETACH)
 		delete(sv.views, c.dir)
 	}
 }
@@ -196,7 +212,8 @@ func unescapeMountinfo(s string) string {
 	return b.String()
 }
 
-// unmountAllStoreViews removes every store view mount (guest shutdown).
+// unmountAllStoreViews removes every store view mount (agent start and
+// shutdown). Running containers keep their own copies of the mounts.
 func (s *Server) unmountAllStoreViews() {
 	s.views.mu.Lock()
 	defer s.views.mu.Unlock()

@@ -82,6 +82,9 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 	s.privateBind = makePrivate(cfg.Root)
+	// views left by a previous agent (possibly half built) are rebuilt
+	// on demand
+	s.unmountAllStoreViews()
 	// leftovers from interrupted transfers
 	entries, _ := os.ReadDir(s.layout.Tmp())
 	for _, e := range entries {
