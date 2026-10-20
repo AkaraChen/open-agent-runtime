@@ -115,6 +115,7 @@ func runMain(args []string) error {
 		if err := s.fn(); err != nil {
 			b.res.Notes = append(b.res.Notes, fmt.Sprintf("phase %s failed: %v", s.name, err))
 			logf("phase %s failed: %v", s.name, err)
+			b.saveVMLogs(*out, s.name)
 			if s.name == "build" || s.name == "vm" || s.name == "warm" {
 				break
 			}
@@ -1563,4 +1564,16 @@ func (b *bench) phaseVMRestart() error {
 		}
 	}
 	return nil
+}
+
+// saveVMLogs copies the VM's console and supervisor logs next to the results
+// after a failed phase (<out>.<phase>.console.log, ...), for diagnosis.
+func (b *bench) saveVMLogs(out, phase string) {
+	dir := vm.Dir(b.home, "default")
+	base := strings.TrimSuffix(out, ".json")
+	for _, name := range []string{"console.log", "supervisor.log", "qemu.log"} {
+		if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+			os.WriteFile(fmt.Sprintf("%s.%s.%s", base, phase, name), data, 0o644)
+		}
+	}
 }

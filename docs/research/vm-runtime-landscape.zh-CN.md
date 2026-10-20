@@ -243,6 +243,8 @@ flowchart LR
 
 ## 6. 建议路线图
 
+> 实施情况：逐项的实测报告见 [docs/benchmarks](../benchmarks/README.md)；完成情况汇总见[第 9 步报告](../benchmarks/09-evaluations/README.md)。
+
 ### P0-1：把产物从「tar 解包」改成「只读块镜像」
 
 **做法**：

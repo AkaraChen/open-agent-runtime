@@ -100,4 +100,6 @@ jobs:
         if: always()
         with:
           name: results-${{ matrix.label }}
-          path: results-${{ matrix.label }}*.json
+          path: |
+            results-${{ matrix.label }}*.json
+            results-${{ matrix.label }}*.log
