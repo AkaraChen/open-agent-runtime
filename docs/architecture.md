@@ -169,7 +169,7 @@ The CLI and agent check a protocol version, so a CLI refuses to drive an outdate
 ├── store/nix/store/<hash-name>/   shared immutable Nix store (all warmed store paths)
 ├── components/<sha>/tree/         extracted component trees
 ├── bundles/<digest>/bundle.json   composed bundle templates (layers + OCI spec)
-├── bundles/<digest>/store/        /nix/store skeleton: one empty mountpoint per closure path
+├── bundles/<digest>/store/        /nix/store view: closure paths bound read-only (built once per bundle)
 └── instances/<id>/                per-container: rootfs (overlay mount), upper/, work/,
                                    config.json, console.log
 ```
@@ -205,7 +205,7 @@ flowchart TB
     C1["component tree: my-agent"] --> ROOT
     C2["component tree: app-config"] --> ROOT
     BASE["base rootfs: debian-trixie-slim"] --> ROOT
-    SK["bundle skeleton<br/>(closure mountpoints)"] --> NS
+    SK["bundle view<br/>(built once, single rbind)"] --> NS
     subgraph Shared["shared guest /nix/store"]
         S1["…-nodejs-22"]
         S2["…-glibc-2.42"]
@@ -219,10 +219,15 @@ Component layers are ordered by content hash, not by configuration order. This i
 conflicts were already rejected by the builder.
 
 The guest keeps one shared, deduplicated `/nix/store`, but each container sees **only its own
-closure**. A per-bundle skeleton of empty mountpoints is bound read-only at `/nix/store`, and each
-closure path is bound read-only onto its mountpoint. Store paths warmed for other bundles stay
-invisible, and nothing under `/nix/store` is writable. For a 120-path closure this adds about 12 ms
-to `runc create`.
+closure**. For each bundle, the agent builds a view once: a skeleton of empty mountpoints, one per
+closure path, with each store path bind-mounted read-only onto its mountpoint. Every container of
+that bundle then receives the whole view through a single recursive bind. Store paths warmed for
+other bundles stay invisible, nothing under `/nix/store` is writable, and start cost does not grow
+with the closure size.
+
+Building a view costs about 13 ms for a 120-path closure, once per bundle. Views of bundles
+without running containers are unmounted when more than eight are mounted, and all views are
+unmounted when the guest stops.
 
 ### Starting a container
 

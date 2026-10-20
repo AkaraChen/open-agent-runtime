@@ -79,7 +79,7 @@ Where the time goes, inside the guest, for a typical switch:
 |---|---|
 | compose (cached template) | ~1 ms |
 | overlay mount + config | ~1 ms |
-| `runc create` (including one mount per store path) | 40–50 ms |
+| `runc create` | 20–40 ms |
 | `runc start` | ~5 ms |
 | readiness (application startup) | ~30 ms |
 | stop old instance | ~10 ms |

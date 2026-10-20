@@ -59,14 +59,18 @@ func (l Layout) InstancesDir() string { return filepath.Join(l.Root, "instances"
 func (l Layout) Tmp() string { return filepath.Join(l.Root, "tmp") }
 
 // templateFormat is bumped whenever Spec or Layers change shape.
-// 3: per-store-path /nix/store mounts over a per-bundle skeleton.
-const templateFormat = 3
+// 4: /nix/store is a per-bundle view of the closure, bound with one rbind.
+const templateFormat = 4
 
 // Bundle is a cached, composed bundle template.
 type Bundle struct {
 	// Format invalidates cached templates when the generator changes.
 	Format int    `json:"format"`
 	Digest string `json:"digest"`
+	// StoreView is the /nix/store view directory and StorePaths the closure
+	// that must be mounted into it (sorted store path names).
+	StoreView  string   `json:"storeView,omitempty"`
+	StorePaths []string `json:"storePaths,omitempty"`
 	// Layers are overlay lower directories, highest priority first.
 	Layers []string    `json:"layers"`
 	Spec   *specs.Spec `json:"spec"`
@@ -110,6 +114,13 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 		return nil, err
 	}
 	b := &Bundle{Format: templateFormat, Digest: want, Layers: Layers(l, pl), Spec: Spec(l, pl)}
+	if len(pl.StorePaths) > 0 {
+		b.StoreView = l.StoreView(want)
+		for _, sp := range pl.StorePaths {
+			b.StorePaths = append(b.StorePaths, sp.Name())
+		}
+		sort.Strings(b.StorePaths)
+	}
 	data, err := json.Marshal(b)
 	if err != nil {
 		return nil, err
@@ -189,7 +200,17 @@ func writeStoreView(l Layout, pl *manifest.PlatformLock) error {
 	}
 	defer os.RemoveAll(tmp)
 	for _, sp := range pl.StorePaths {
-		if err := os.Mkdir(filepath.Join(tmp, sp.Name()), 0o755); err != nil {
+		mp := filepath.Join(tmp, sp.Name())
+		// a store path may be a single file; its mountpoint must be a file
+		if st, err := os.Stat(l.StorePath(sp.Name())); err == nil && !st.IsDir() {
+			f, err := os.OpenFile(mp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+			if err != nil {
+				return err
+			}
+			f.Close()
+			continue
+		}
+		if err := os.Mkdir(mp, 0o755); err != nil {
 			return err
 		}
 	}
@@ -279,24 +300,15 @@ func Spec(l Layout, pl *manifest.PlatformLock) *specs.Spec {
 		},
 	}
 	if len(pl.StorePaths) > 0 {
-		// Only this bundle's closure is visible: a read-only skeleton with
-		// one empty directory per store path is bound at /nix/store, then
-		// each store path is bound read-only onto its directory.
+		// Only this bundle's closure is visible. The guest agent mounts each
+		// closure path read-only onto the bundle's skeleton once (see
+		// Bundle.StorePaths); every container then receives that view with
+		// a single recursive bind, so start cost does not grow with the
+		// closure size.
 		s.Mounts = append(s.Mounts, specs.Mount{
 			Destination: "/nix/store", Type: "bind", Source: l.StoreView(pl.BundleDigest),
-			Options: []string{"bind", "ro", "nosuid", "nodev"},
+			Options: []string{"rbind", "ro", "nosuid", "nodev"},
 		})
-		names := make([]string, 0, len(pl.StorePaths))
-		for _, sp := range pl.StorePaths {
-			names = append(names, sp.Name())
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			s.Mounts = append(s.Mounts, specs.Mount{
-				Destination: "/nix/store/" + n, Type: "bind", Source: l.StorePath(n),
-				Options: []string{"bind", "ro", "nosuid", "nodev"},
-			})
-		}
 	}
 	return s
 }

@@ -38,6 +38,7 @@ const (
 	OpLogs       = "logs"
 	OpExec       = "exec"
 	OpShutdown   = "shutdown"
+	OpStats      = "stats"
 )
 
 // Request header.

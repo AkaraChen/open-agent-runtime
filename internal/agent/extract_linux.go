@@ -18,7 +18,13 @@ import (
 // extractTar unpacks a tar stream into dest (which must exist). It preserves
 // ownership, permissions, xattrs, device nodes and timestamps, and refuses to
 // write through symlinks or outside dest.
-func extractTar(r io.Reader, dest string) error {
+func extractTar(r io.Reader, dest string) (int, error) {
+	n := 0
+	err := extractTarCount(r, dest, &n)
+	return n, err
+}
+
+func extractTarCount(r io.Reader, dest string, count *int) error {
 	tr := tar.NewReader(r)
 	type dirMeta struct {
 		path string
@@ -67,6 +73,7 @@ func extractTar(r io.Reader, dest string) error {
 		if rel == "" {
 			continue
 		}
+		*count++
 		if err := ensureDir(parentOf(rel)); err != nil {
 			return err
 		}

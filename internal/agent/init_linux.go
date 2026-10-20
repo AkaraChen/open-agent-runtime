@@ -57,9 +57,12 @@ func RunInit() {
 		}
 	}
 	enableControllers()
+	markBoot("mounts")
 	unix.Sethostname([]byte("oar-guest"))
 	ifUp("lo")
+	markBoot("init")
 	mountData()
+	markBoot("dataDisk")
 	if _, err := os.Stat("/sys/class/net/eth0"); err == nil {
 		ifUp("eth0")
 		if p, err := exec.LookPath("udhcpc"); err == nil {
@@ -178,6 +181,7 @@ func mountData() {
 	}
 	if !hasExt4(dev) {
 		logInit("formatting %s", dev)
+		markBoot("formatStart")
 		out, err := exec.Command("mkfs.ext4", "-q", "-F", "-L", "oar-data", "-E", "lazy_itable_init=1,lazy_journal_init=1", dev).CombinedOutput()
 		if err != nil {
 			logInit("mkfs.ext4 failed: %v: %s", err, out)

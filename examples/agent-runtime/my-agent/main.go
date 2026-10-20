@@ -45,6 +45,11 @@ func osRelease() string {
 }
 
 func main() {
+	// MY_AGENT_INIT_DELAY simulates a slow-starting application (e.g. loading
+	// a model or importing a large framework) before it starts serving.
+	if d, err := time.ParseDuration(os.Getenv("MY_AGENT_INIT_DELAY")); err == nil && d > 0 {
+		time.Sleep(d)
+	}
 	host, _ := os.Hostname()
 	report := map[string]string{
 		"arch":     runtime.GOARCH,

@@ -1,0 +1,86 @@
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: quick or full
+        default: quick
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  guest:
+    name: guest image (${{ matrix.arch }})
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: kernel cache
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: guest/out/${{ matrix.arch }}/kernel*
+          key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
+      - if: steps.kcache.outputs.cache-hit != 'true'
+        run: guest/build.sh ${{ matrix.arch }} kernel
+      - run: guest/build.sh ${{ matrix.arch }} initramfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}
+          path: guest/out/${{ matrix.arch }}/
+          retention-days: 3
+
+  bench:
+    name: bench ${{ matrix.backend }} (${{ matrix.os }})
+    needs: guest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64, backend: native, label: native }
+          - { os: ubuntu-latest, arch: amd64, backend: kvm, label: kvm }
+          - { os: macos-15-intel, arch: amd64, backend: vz, label: vz-intel }
+          - { os: macos-15, arch: arm64, backend: qemu, label: qemu-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - if: runner.os == 'macOS'
+        uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}
+          path: guest/out/${{ matrix.arch }}
+      - if: matrix.backend == 'kvm'
+        name: enable kvm and vhost-vsock
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock && sudo chmod 666 /dev/vhost-vsock
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - if: matrix.backend == 'qemu'
+        run: brew install qemu
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/iets-ffi
+      - run: hack/build.sh
+      - name: benchmark
+        run: |
+          go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
+            -profile ${{ github.event.inputs.profile || 'quick' }} \
+            -out results-${{ matrix.label }}.json -- --cpus 2 --memory 4096
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.label }}
+          path: results-${{ matrix.label }}.json

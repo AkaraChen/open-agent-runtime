@@ -128,6 +128,7 @@ See [platforms](docs/platforms.md) for host requirements and supported backends.
 | [Operations](docs/operations.md) | switching environments, distributing caches, reload strategies |
 | [Platforms](docs/platforms.md) | backends, guest image, macOS notes |
 | [Development](docs/development.md) | building, testing, CI |
+| [VM runtime landscape](docs/research/vm-runtime-landscape.zh-CN.md) | survey of VM/sandbox runtimes and roadmap (Chinese) |
 
 ## Platform support
 

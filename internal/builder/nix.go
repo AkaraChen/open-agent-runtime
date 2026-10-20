@@ -66,6 +66,7 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 		return out, nil
 	}
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
+	b.opts.Stats.EvaluatedAttr += len(missing)
 	child := nixeval.Child{Log: b.opts.Log}
 	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing})
 	if err != nil {
@@ -280,6 +281,8 @@ func (f *fetcher) fetch(base string) (*storeMeta, error) {
 	}
 	f.mu.Lock()
 	f.b.fetched++
+	f.b.opts.Stats.FetchedPaths++
+	f.b.opts.Stats.FetchedBytes += cw.n
 	f.mu.Unlock()
 	f.b.logf("  fetched %s (%s)", base, humanSize(cw.n))
 	return m, nil
