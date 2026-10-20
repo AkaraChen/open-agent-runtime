@@ -44,7 +44,10 @@ func (r *Runc) run(ctx context.Context, args ...string) ([]byte, error) {
 
 // Create runs `runc create`; the container's stdio is the log file.
 func (r *Runc) Create(ctx context.Context, id, bundle string, log *os.File) error {
-	args := []string{"create", "--bundle", bundle, "--pid-file", bundle + "/pid"}
+	// no --pid-file: runc writes it with O_SYNC, which waits for an ext4
+	// journal commit; after a warm that commit carries the metadata of
+	// every extracted file and took up to 3 s (the pid comes from state)
+	args := []string{"create", "--bundle", bundle}
 	if r.NoPivot {
 		args = append(args, "--no-pivot")
 	}
