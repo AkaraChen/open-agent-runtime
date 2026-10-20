@@ -13,6 +13,7 @@
 | 6 | [VM 冷启动](06-vm-boot/README.md) | 启动阶段拆分、amd64 改用 microvm、LZ4 内核与 initramfs、switch_root 不复制、去掉固定等待 |
 | 7 | [warm 刷盘与就绪通知](07-warm-flush/README.md) | warm 结束前刷盘（首次启动 784 → 40 ms）、microvm 仅限 KVM、qemu 静态网络与就绪通知、store 视图同机 A/B（`ab-store-view/`） |
 | 8 | [端口转发](08-port-forwarding/README.md) | qemu 由 QEMU 自己转发、vz 直连 guest 地址（P1-3）；native 也在 warm 结束前刷盘 |
+| 9 | [剩余路线图评估](09-evaluations/README.md) | Cloud Hypervisor 实测后不采用、只读镜像暂缓、内存回收实测无效；路线图完成情况汇总 |
 
 复现方法：
 
