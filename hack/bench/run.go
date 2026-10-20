@@ -1054,6 +1054,11 @@ func (b *bench) phaseDensity() error {
 	for i := 0; i < k; i++ {
 		b.rm(fmt.Sprintf("c%d", i))
 	}
+	// memory the VM keeps on the host after its containers are gone (memory
+	// the guest freed is only returned with free page reporting)
+	if rss, _, _ := b.idleResources(5 * time.Second); rss > 0 {
+		b.add(g, "vm.rss.after", fmt.Sprintf("同时运行 %d 个容器并删除后：宿主机上 VM 进程树内存", k), "MiB", true, rss/(1<<20))
+	}
 
 	// many bundles cached in the guest
 	vs := 10
