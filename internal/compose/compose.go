@@ -49,14 +49,23 @@ func (l Layout) BundleDir(digest string) string {
 	return filepath.Join(l.Root, "bundles", hexOf(digest))
 }
 
+// StoreView is the per-bundle /nix/store skeleton (empty mountpoints).
+func (l Layout) StoreView(digest string) string { return filepath.Join(l.BundleDir(digest), "store") }
+
 // InstancesDir holds per-container instance directories.
 func (l Layout) InstancesDir() string { return filepath.Join(l.Root, "instances") }
 
 // Tmp is a scratch directory on the same filesystem as the caches.
 func (l Layout) Tmp() string { return filepath.Join(l.Root, "tmp") }
 
+// templateFormat is bumped whenever Spec or Layers change shape.
+// 3: per-store-path /nix/store mounts over a per-bundle skeleton.
+const templateFormat = 3
+
 // Bundle is a cached, composed bundle template.
 type Bundle struct {
+	// Format invalidates cached templates when the generator changes.
+	Format int    `json:"format"`
 	Digest string `json:"digest"`
 	// Layers are overlay lower directories, highest priority first.
 	Layers []string    `json:"layers"`
@@ -85,8 +94,8 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	cachePath := filepath.Join(l.BundleDir(want), "bundle.json")
 	if b, err := os.ReadFile(cachePath); err == nil {
 		var cached Bundle
-		if json.Unmarshal(b, &cached) == nil && cached.Digest == want {
-			if err := checkWarm(l, pl); err == nil {
+		if json.Unmarshal(b, &cached) == nil && cached.Digest == want && cached.Format == templateFormat {
+			if err := checkWarm(l, pl); err == nil && (len(pl.StorePaths) == 0 || isDir(l.StoreView(want))) {
 				return &Result{Bundle: &cached, Cached: true}, nil
 			}
 		}
@@ -97,7 +106,10 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	if err := checkComponentConflicts(pl); err != nil {
 		return nil, err
 	}
-	b := &Bundle{Digest: want, Layers: Layers(l, pl), Spec: Spec(l, pl)}
+	if err := writeStoreView(l, pl); err != nil {
+		return nil, err
+	}
+	b := &Bundle{Format: templateFormat, Digest: want, Layers: Layers(l, pl), Spec: Spec(l, pl)}
 	data, err := json.Marshal(b)
 	if err != nil {
 		return nil, err
@@ -153,6 +165,40 @@ func checkComponentConflicts(pl *manifest.PlatformLock) error {
 			}
 			owner[f] = c.Name
 		}
+	}
+	return nil
+}
+
+// writeStoreView creates the skeleton of mountpoints for the closure. It
+// is built in a temporary directory and renamed into place, so concurrent
+// composes never see a partial view.
+func writeStoreView(l Layout, pl *manifest.PlatformLock) error {
+	if len(pl.StorePaths) == 0 {
+		return nil
+	}
+	dst := l.StoreView(pl.BundleDigest)
+	if isDir(dst) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), "store.tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	for _, sp := range pl.StorePaths {
+		if err := os.Mkdir(filepath.Join(tmp, sp.Name()), 0o755); err != nil {
+			return err
+		}
+	}
+	// read-only is enforced by the bind mount, not by permissions
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil && !isDir(dst) {
+		return err
 	}
 	return nil
 }
@@ -233,10 +279,24 @@ func Spec(l Layout, pl *manifest.PlatformLock) *specs.Spec {
 		},
 	}
 	if len(pl.StorePaths) > 0 {
+		// Only this bundle's closure is visible: a read-only skeleton with
+		// one empty directory per store path is bound at /nix/store, then
+		// each store path is bound read-only onto its directory.
 		s.Mounts = append(s.Mounts, specs.Mount{
-			Destination: "/nix/store", Type: "bind", Source: l.StoreRoot(),
-			Options: []string{"rbind", "ro", "nosuid", "nodev"},
+			Destination: "/nix/store", Type: "bind", Source: l.StoreView(pl.BundleDigest),
+			Options: []string{"bind", "ro", "nosuid", "nodev"},
 		})
+		names := make([]string, 0, len(pl.StorePaths))
+		for _, sp := range pl.StorePaths {
+			names = append(names, sp.Name())
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			s.Mounts = append(s.Mounts, specs.Mount{
+				Destination: "/nix/store/" + n, Type: "bind", Source: l.StorePath(n),
+				Options: []string{"bind", "ro", "nosuid", "nodev"},
+			})
+		}
 	}
 	return s
 }

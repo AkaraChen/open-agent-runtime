@@ -66,14 +66,27 @@ func TestComposeDeterministicAndCached(t *testing.T) {
 	if last := r1.Bundle.Layers[len(r1.Bundle.Layers)-1]; last != l.BaseDir(p1.Base.Key) {
 		t.Fatalf("base must be the lowest layer, got %s", last)
 	}
-	var store bool
+	var skeleton, bind bool
 	for _, m := range r1.Bundle.Spec.Mounts {
-		if m.Destination == "/nix/store" {
-			store = m.Source == l.StoreRoot() && strings.Contains(strings.Join(m.Options, ","), "ro")
+		switch {
+		case m.Destination == "/nix/store":
+			skeleton = m.Source == l.StoreView(p1.BundleDigest) && strings.Contains(strings.Join(m.Options, ","), "ro")
+		case strings.HasPrefix(m.Destination, "/nix/store/"):
+			if m.Destination != "/nix/store/aaa-git" || m.Source != l.StorePath("aaa-git") ||
+				!strings.Contains(strings.Join(m.Options, ","), "ro") {
+				t.Fatalf("unexpected store mount %+v", m)
+			}
+			bind = true
+		case m.Source == l.StoreRoot():
+			t.Fatal("whole shared store must not be mounted")
 		}
 	}
-	if !store {
-		t.Fatal("missing read-only /nix/store bind mount")
+	if !skeleton || !bind {
+		t.Fatalf("store view: skeleton=%v bind=%v", skeleton, bind)
+	}
+	entries, err := os.ReadDir(l.StoreView(p1.BundleDigest))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "aaa-git" {
+		t.Fatalf("store skeleton: %v %v", entries, err)
 	}
 }
 

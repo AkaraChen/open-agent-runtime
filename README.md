@@ -10,6 +10,8 @@
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+English | [简体中文](README.zh-CN.md)
+
 </div>
 
 ---
@@ -92,6 +94,7 @@ Read the [architecture guide](docs/architecture.md) for the full design.
 | **Resident guest** | A minimal Linux VM boots once and serves every container: Virtualization.framework on macOS, KVM on Linux |
 | **Zero-downtime reloads** | `overlap` and `replace` strategies, readiness checks, automatic rollback |
 | **Offline distribution** | Start and switch compiled environments by digest: no config, compilers or network needed |
+| **Isolated environments** | Each container sees only its own `/nix/store` closure, read-only |
 
 ## Getting started
 

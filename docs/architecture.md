@@ -164,9 +164,10 @@ The CLI and agent check a protocol version, so a CLI refuses to drive an outdate
 ```text
 /var/lib/oar/
 ├── bases/<sha>/rootfs/            extracted base root filesystems
-├── store/nix/store/<hash-name>/   shared immutable Nix store (mounted read-only into containers)
+├── store/nix/store/<hash-name>/   shared immutable Nix store (all warmed store paths)
 ├── components/<sha>/tree/         extracted component trees
 ├── bundles/<digest>/bundle.json   composed bundle templates (layers + OCI spec)
+├── bundles/<digest>/store/        /nix/store skeleton: one empty mountpoint per closure path
 └── instances/<id>/                per-container: rootfs (overlay mount), upper/, work/,
                                    config.json, console.log
 ```
@@ -194,17 +195,32 @@ The container's root filesystem is a mounted view, not a copied image:
 flowchart TB
     subgraph View["container view"]
         ROOT["/  (OverlayFS)"]
-        NS["/nix/store  (read-only bind)"]
+        NS["/nix/store  (read-only skeleton)"]
+        P1["/nix/store/…-nodejs-22"]
+        P2["/nix/store/…-glibc-2.42"]
     end
     UP["instance upper/ (writable)"] --> ROOT
     C1["component tree: my-agent"] --> ROOT
     C2["component tree: app-config"] --> ROOT
     BASE["base rootfs: debian-trixie-slim"] --> ROOT
-    STORE["shared guest /nix/store"] --> NS
+    SK["bundle skeleton<br/>(closure mountpoints)"] --> NS
+    subgraph Shared["shared guest /nix/store"]
+        S1["…-nodejs-22"]
+        S2["…-glibc-2.42"]
+        S3["…-git-2.54  (other bundle)"]
+    end
+    S1 -- "ro bind" --> P1
+    S2 -- "ro bind" --> P2
 ```
 
 Component layers are ordered by content hash, not by configuration order. This is safe because
 conflicts were already rejected by the builder.
+
+The guest keeps one shared, deduplicated `/nix/store`, but each container sees **only its own
+closure**. A per-bundle skeleton of empty mountpoints is bound read-only at `/nix/store`, and each
+closure path is bound read-only onto its mountpoint. Store paths warmed for other bundles stay
+invisible, and nothing under `/nix/store` is writable. For a 120-path closure this adds about 12 ms
+to `runc create`.
 
 ### Starting a container
 
@@ -298,7 +314,8 @@ environment:
   guest. Bundle locks are re-hashed before use, so a tampered lock is rejected.
 - **Extraction.** Tar extraction refuses to traverse symlinks or escape the destination.
 - **Containers.** They run under `runc` with namespaces (pid, ipc, uts, mount, cgroup), a default
-  capability set, `no_new_privs`, masked `/proc` paths, and a read-only `/nix/store`.
+  capability set, `no_new_privs`, masked `/proc` paths, and a read-only `/nix/store` limited to
+  the bundle's own closure.
 - **Guest isolation.** In VM backends, the guest kernel isolates workloads from the host. The
   `native` backend runs containers on the host kernel and needs root.
 

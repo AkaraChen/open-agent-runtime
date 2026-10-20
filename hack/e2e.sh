@@ -94,6 +94,10 @@ echo "$REPORT" | jq -e '.os | test("Debian")' >/dev/null || fail "not a Debian r
 echo "$REPORT" | jq -e --arg a "$ARCH" '.arch == $a' >/dev/null || fail "wrong arch"
 oar exec --name "$NAME" -- sh -c 'test -x /opt/my-agent && ! touch /nix/store/.w 2>/dev/null && echo "nix store is read-only, /opt/my-agent present"'
 oar exec --name "$NAME" -- node -e 'console.log("node ok", process.version)'
+WANT=$(jq '.storePaths | length' "$EX/artifacts/manifests/bundles/${DIGEST#sha256:}.json")
+GOT=$(oar exec --name "$NAME" -- sh -c 'ls /nix/store | wc -l' | tr -d ' ')
+[ "$GOT" = "$WANT" ] || fail "/nix/store shows $GOT entries, the bundle closure has $WANT"
+echo "/nix/store exposes exactly the bundle closure ($GOT store paths)"
 oar exec --name "$NAME" -- python3 -c 'import ssl, sqlite3; print("python ok", ssl.OPENSSL_VERSION)'
 oar exec --name "$NAME" -- git init -q /tmp/repo
 oar exec --name "$NAME" -- cat /tmp/my-agent.json > "$WORK/env-original.json"
