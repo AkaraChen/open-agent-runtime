@@ -11,6 +11,7 @@
 | 4 | [应用快照](04-snapshots/README.md) | CRIU 快照与恢复（`process.snapshot`）、guest switch_root（pivot_root）、CRIU 进 guest 镜像 |
 | 5 | [store 视图改为硬链接树](05-store-views/README.md) | issue #2 的根因：视图挂载不再常驻 agent 命名空间；按闭包缓存视图（vz 回归待查） |
 | 6 | [VM 冷启动](06-vm-boot/README.md) | 启动阶段拆分、amd64 改用 microvm、LZ4 内核与 initramfs、switch_root 不复制、去掉固定等待 |
+| 7 | [warm 刷盘与就绪通知](07-warm-flush/README.md) | warm 结束前刷盘（首次启动 784 → 40 ms）、microvm 仅限 KVM、qemu 静态网络与就绪通知、store 视图同机 A/B（`ab-store-view/`） |
 
 复现方法：
 

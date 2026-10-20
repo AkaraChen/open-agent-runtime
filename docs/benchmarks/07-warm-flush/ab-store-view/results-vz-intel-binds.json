@@ -1,0 +1,1440 @@
+{
+  "backend": "vz",
+  "platform": "linux/amd64",
+  "host": "darwin/amd64 sjc20-bb658-357b42be-277e-4412-bd76-cb26908ea4c7-2A999905E3DC.local · Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz · 4 CPU",
+  "commit": "af48477",
+  "profile": "quick",
+  "started": "2026-10-20T08:46:11.844321Z",
+  "durationSeconds": 7411.246548429,
+  "metrics": [
+    {
+      "group": "0-env",
+      "key": "fork",
+      "name": "宿主机 fork+exec 延迟（true）",
+      "unit": "ms",
+      "samples": [
+        10.112075,
+        10.238465,
+        6.584544,
+        5.901839,
+        6.089886,
+        7.593844,
+        6.244133,
+        6.227115,
+        5.412258,
+        7.230263,
+        6.615824,
+        9.259542,
+        9.521912,
+        6.561781,
+        5.137765,
+        5.5142,
+        5.033198,
+        4.162325,
+        4.807931,
+        4.186234,
+        4.961417,
+        4.046013,
+        4.045182,
+        4.318141,
+        5.274671,
+        4.012681,
+        3.927441,
+        4.061482,
+        4.006801,
+        5.046191,
+        4.706175,
+        5.415671,
+        5.676064,
+        96.9271,
+        4.991544,
+        5.266381,
+        4.763194,
+        4.50996,
+        4.879153,
+        5.465097,
+        4.883228,
+        4.781951,
+        5.049682,
+        5.484716,
+        5.23333,
+        5.030915,
+        5.029616,
+        5.193604,
+        5.972305,
+        4.791317
+      ],
+      "n": 50,
+      "p50": 5.137765,
+      "p95": 10.112075,
+      "p99": 96.9271,
+      "max": 96.9271,
+      "min": 3.927441,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "0-env",
+      "key": "cpu",
+      "name": "宿主机单核 CPU（sha256 64 MiB）",
+      "unit": "ms",
+      "samples": [
+        346.669985,
+        196.599554,
+        199.670527
+      ],
+      "n": 3,
+      "p50": 199.670527,
+      "p95": 346.669985,
+      "p99": 346.669985,
+      "max": 346.669985,
+      "min": 196.599554,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "0-env",
+      "key": "disk",
+      "name": "宿主机磁盘顺序写（256 MiB + fsync）",
+      "unit": "MiB/s",
+      "samples": [
+        225.8970722615244
+      ],
+      "n": 1,
+      "p50": 225.8970722615244,
+      "p95": 225.8970722615244,
+      "p99": 225.8970722615244,
+      "max": 225.8970722615244,
+      "min": 225.8970722615244,
+      "status": "ok",
+      "lowerIsBetter": false
+    },
+    {
+      "group": "1-build",
+      "key": "cold.total",
+      "name": "全量构建（空产物目录）",
+      "unit": "s",
+      "samples": [
+        9.905047245
+      ],
+      "n": 1,
+      "p50": 9.905047245,
+      "p95": 9.905047245,
+      "p99": 9.905047245,
+      "max": 9.905047245,
+      "min": 9.905047245,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "cold.base",
+      "name": "　其中：基础镜像拉取与展平",
+      "unit": "s",
+      "samples": [
+        2.810287012
+      ],
+      "n": 1,
+      "p50": 2.810287012,
+      "p95": 2.810287012,
+      "p99": 2.810287012,
+      "max": 2.810287012,
+      "min": 2.810287012,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "cold.eval",
+      "name": "　其中：Nix 求值",
+      "unit": "s",
+      "samples": [
+        0.523316373
+      ],
+      "n": 1,
+      "p50": 0.523316373,
+      "p95": 0.523316373,
+      "p99": 0.523316373,
+      "max": 0.523316373,
+      "min": 0.523316373,
+      "status": "ok",
+      "note": "nix 自身的 tarball/eval 缓存可能已预热",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "cold.fetch",
+      "name": "　其中：闭包下载与 NAR→tar",
+      "unit": "s",
+      "samples": [
+        5.816685411
+      ],
+      "n": 1,
+      "p50": 5.816685411,
+      "p95": 5.816685411,
+      "p99": 5.816685411,
+      "max": 5.816685411,
+      "min": 5.816685411,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "cold.components",
+      "name": "　其中：组件构建与导入",
+      "unit": "s",
+      "samples": [
+        0.220466052
+      ],
+      "n": 1,
+      "p50": 0.220466052,
+      "p95": 0.220466052,
+      "p99": 0.220466052,
+      "max": 0.220466052,
+      "min": 0.220466052,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "cold.fetched",
+      "name": "下载的 store path / 字节",
+      "unit": "MiB",
+      "samples": [
+        552.7578125
+      ],
+      "n": 1,
+      "p50": 552.7578125,
+      "p95": 552.7578125,
+      "p99": 552.7578125,
+      "max": 552.7578125,
+      "min": 552.7578125,
+      "status": "ok",
+      "note": "120 个 store path",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "closure.paths",
+      "name": "闭包 store path 数",
+      "unit": "个",
+      "samples": [
+        120
+      ],
+      "n": 1,
+      "p50": 120,
+      "p95": 120,
+      "p99": 120,
+      "max": 120,
+      "min": 120,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "closure.size",
+      "name": "闭包大小（tar）",
+      "unit": "MiB",
+      "samples": [
+        552.7578125
+      ],
+      "n": 1,
+      "p50": 552.7578125,
+      "p95": 552.7578125,
+      "p99": 552.7578125,
+      "max": 552.7578125,
+      "min": 552.7578125,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "noop",
+      "name": "无变化重建",
+      "unit": "ms",
+      "samples": [
+        286.015422
+      ],
+      "n": 1,
+      "p50": 286.015422,
+      "p95": 286.015422,
+      "p99": 286.015422,
+      "max": 286.015422,
+      "min": 286.015422,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "incr.remove",
+      "name": "增量构建：删除一个组件（nix:git）",
+      "unit": "ms",
+      "samples": [
+        255.641509
+      ],
+      "n": 1,
+      "p50": 255.641509,
+      "p95": 255.641509,
+      "p99": 255.641509,
+      "max": 255.641509,
+      "min": 255.641509,
+      "status": "ok",
+      "note": "下载 0 个 path，求值 0 个属性",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "incr.addnew",
+      "name": "增量构建：新增未求值过的包（nix:hello）",
+      "unit": "s",
+      "samples": [
+        0.579603131
+      ],
+      "n": 1,
+      "p50": 0.579603131,
+      "p95": 0.579603131,
+      "p99": 0.579603131,
+      "max": 0.579603131,
+      "min": 0.579603131,
+      "status": "ok",
+      "note": "求值 0.3s，下载 1 个 path / 0.3 MiB",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "dedup",
+      "name": "去重率：新增 jq 的组合实际下载 / 闭包大小",
+      "unit": "%",
+      "samples": [
+        0.20742224310451066
+      ],
+      "n": 1,
+      "p50": 0.20742224310451066,
+      "p95": 0.20742224310451066,
+      "p99": 0.20742224310451066,
+      "max": 0.20742224310451066,
+      "min": 0.20742224310451066,
+      "status": "ok",
+      "note": "下载 1.1 MiB / 闭包 553.9 MiB",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "art.total",
+      "name": "产物目录总大小（含所有已构建组合）",
+      "unit": "MiB",
+      "samples": [
+        638.0192794799805
+      ],
+      "n": 1,
+      "p50": 638.0192794799805,
+      "p95": 638.0192794799805,
+      "p99": 638.0192794799805,
+      "max": 638.0192794799805,
+      "min": 638.0192794799805,
+      "status": "ok",
+      "note": "bases 78 MiB, store 554 MiB, components 5.8 MiB",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "1-build",
+      "key": "art.pathsize",
+      "name": "单个 store path 大小分布",
+      "unit": "MiB",
+      "n": 120,
+      "p50": 0.22802734375,
+      "p95": 23.72314453125,
+      "p99": 83.173828125,
+      "max": 129.40673828125,
+      "min": 0.01220703125,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.cold",
+      "name": "虚拟机冷启动（含首次格式化数据盘）",
+      "unit": "ms",
+      "samples": [
+        10763.372877
+      ],
+      "n": 1,
+      "p50": 10763.372877,
+      "p95": 10763.372877,
+      "p99": 10763.372877,
+      "max": 10763.372877,
+      "min": 10763.372877,
+      "status": "ok",
+      "note": "CLI 墙钟：vm start 到 agent 可用",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.cli",
+      "name": "　其中：CLI 拉起 supervisor 进程（含 daemonize）",
+      "unit": "ms",
+      "samples": [
+        151.22011199999906
+      ],
+      "n": 1,
+      "p50": 151.22011199999906,
+      "p95": 151.22011199999906,
+      "p99": 151.22011199999906,
+      "max": 151.22011199999906,
+      "min": 151.22011199999906,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.machine",
+      "name": "　其中：后端创建并启动虚拟机（Boot 返回）",
+      "unit": "ms",
+      "samples": [
+        245.353601
+      ],
+      "n": 1,
+      "p50": 245.353601,
+      "p95": 245.353601,
+      "p99": 245.353601,
+      "max": 245.353601,
+      "min": 245.353601,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.reach",
+      "name": "　其中：虚拟机启动后到 agent 首次可达",
+      "unit": "ms",
+      "samples": [
+        10366.238737
+      ],
+      "n": 1,
+      "p50": 10366.238737,
+      "p95": 10366.238737,
+      "p99": 10366.238737,
+      "max": 10366.238737,
+      "min": 10366.238737,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.toinit",
+      "name": "　宿主机看到 guest init 启动（VMM + 固件 + 内核解压 + 内核启动）",
+      "unit": "ms",
+      "samples": [
+        9043.209517
+      ],
+      "n": 1,
+      "p50": 9043.209517,
+      "p95": 9043.209517,
+      "p99": 9043.209517,
+      "max": 9043.209517,
+      "min": 9043.209517,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.detect",
+      "name": "　guest agent 开始监听到宿主机连上（探测延迟）",
+      "unit": "ms",
+      "samples": [
+        144.094648
+      ],
+      "n": 1,
+      "p50": 144.094648,
+      "p95": 144.094648,
+      "p99": 144.094648,
+      "max": 144.094648,
+      "min": 144.094648,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.guest",
+      "name": "　其中：guest 内核 + init 到 agent 就绪",
+      "unit": "ms",
+      "samples": [
+        4352.678319
+      ],
+      "n": 1,
+      "p50": 4352.678319,
+      "p95": 4352.678319,
+      "p99": 4352.678319,
+      "max": 4352.678319,
+      "min": 4352.678319,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.vmm",
+      "name": "　其中：VMM/宿主侧开销（总时间 − guest 时间）",
+      "unit": "ms",
+      "samples": [
+        6410.694558
+      ],
+      "n": 1,
+      "p50": 6410.694558,
+      "p95": 6410.694558,
+      "p99": 6410.694558,
+      "max": 6410.694558,
+      "min": 6410.694558,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.kernel",
+      "name": "　其中：guest 内核启动（内核时钟开始到运行 init，含解压 initramfs）",
+      "unit": "ms",
+      "samples": [
+        2938.117
+      ],
+      "n": 1,
+      "p50": 2938.117,
+      "p95": 2938.117,
+      "p99": 2938.117,
+      "max": 2938.117,
+      "min": 2938.117,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.switchroot",
+      "name": "　其中：switch_root（离开 initramfs）",
+      "unit": "ms",
+      "samples": [
+        0.9129999999997196
+      ],
+      "n": 1,
+      "p50": 0.9129999999997196,
+      "p95": 0.9129999999997196,
+      "p99": 0.9129999999997196,
+      "max": 0.9129999999997196,
+      "min": 0.9129999999997196,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.format",
+      "name": "　其中：格式化数据盘",
+      "unit": "ms",
+      "samples": [
+        1209.05094
+      ],
+      "n": 1,
+      "p50": 1209.05094,
+      "p95": 1209.05094,
+      "p99": 1209.05094,
+      "max": 1209.05094,
+      "min": 1209.05094,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "rtt",
+      "name": "控制通道往返（info，经宿主 socket → guest agent）",
+      "unit": "ms",
+      "samples": [
+        91.125715,
+        5.67763,
+        4.335243,
+        2.411707,
+        10.544702,
+        10.80462,
+        4.285746,
+        5.482046,
+        43.381285,
+        15.070798,
+        47.991241,
+        4.62587,
+        4.43922,
+        6.692166,
+        57.443327,
+        15.738338,
+        3.650315,
+        6.133305,
+        3.100646,
+        11.66981,
+        3.301686,
+        12.608095,
+        2.520055,
+        3.607182,
+        2.220687,
+        2.912074,
+        19.170133,
+        4.597245,
+        7.136068,
+        16.348956,
+        5.011335,
+        2.615938,
+        12.246704,
+        13.618377,
+        13.290451,
+        42.000808,
+        3.829409,
+        3.259549,
+        7.883646,
+        12.926561,
+        3.679216,
+        4.253477,
+        4.147337,
+        16.667991,
+        7.354554,
+        2.998789,
+        7.185492,
+        11.767764,
+        4.129251,
+        4.948453
+      ],
+      "n": 50,
+      "p50": 5.67763,
+      "p95": 47.991241,
+      "p99": 91.125715,
+      "max": 91.125715,
+      "min": 2.220687,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "rtt.cli",
+      "name": "CLI 单次命令开销（vm status）",
+      "unit": "ms",
+      "samples": [
+        42.997896,
+        33.1428,
+        30.067269,
+        40.341093,
+        32.074324
+      ],
+      "n": 5,
+      "p50": 33.1428,
+      "p95": 42.997896,
+      "p99": 42.997896,
+      "max": 42.997896,
+      "min": 30.067269,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "idle.rss",
+      "name": "空闲时宿主机内存占用（supervisor + VMM 进程树 RSS）",
+      "unit": "MiB",
+      "samples": [
+        334.07421875
+      ],
+      "n": 1,
+      "p50": 334.07421875,
+      "p95": 334.07421875,
+      "p99": 334.07421875,
+      "max": 334.07421875,
+      "min": 334.07421875,
+      "status": "ok",
+      "note": "ps 采样，含 com.apple.Virtualization.VirtualMachine XPC 进程",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "idle.cpu",
+      "name": "空闲时宿主机 CPU 占用（10 秒平均）",
+      "unit": "%",
+      "samples": [
+        18.299999999999983
+      ],
+      "n": 1,
+      "p50": 18.299999999999983,
+      "p95": 18.299999999999983,
+      "p99": 18.299999999999983,
+      "max": 18.299999999999983,
+      "min": 18.299999999999983,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "guest.mem",
+      "name": "guest 可用内存 / 总内存",
+      "unit": "MiB",
+      "samples": [
+        3815.43359375
+      ],
+      "n": 1,
+      "p50": 3815.43359375,
+      "p95": 3815.43359375,
+      "p99": 3815.43359375,
+      "max": 3815.43359375,
+      "min": 3815.43359375,
+      "status": "ok",
+      "note": "总内存 3933 MiB",
+      "lowerIsBetter": false
+    },
+    {
+      "group": "2-warm",
+      "key": "cold",
+      "name": "冷预热完整组合",
+      "unit": "s",
+      "samples": [
+        38.89949562
+      ],
+      "n": 1,
+      "p50": 38.89949562,
+      "p95": 38.89949562,
+      "p99": 38.89949562,
+      "max": 38.89949562,
+      "min": 38.89949562,
+      "status": "ok",
+      "note": "122 个产物，636 MiB，25715 个文件",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "2-warm",
+      "key": "cold.mbps",
+      "name": "冷预热吞吐",
+      "unit": "MiB/s",
+      "samples": [
+        16.350127645948124
+      ],
+      "n": 1,
+      "p50": 16.350127645948124,
+      "p95": 16.350127645948124,
+      "p99": 16.350127645948124,
+      "max": 16.350127645948124,
+      "min": 16.350127645948124,
+      "status": "ok",
+      "lowerIsBetter": false
+    },
+    {
+      "group": "2-warm",
+      "key": "cold.fps",
+      "name": "冷预热文件处理速率",
+      "unit": "文件/s",
+      "samples": [
+        661.0625559571201
+      ],
+      "n": 1,
+      "p50": 661.0625559571201,
+      "p95": 661.0625559571201,
+      "p99": 661.0625559571201,
+      "max": 661.0625559571201,
+      "min": 661.0625559571201,
+      "status": "ok",
+      "lowerIsBetter": false
+    },
+    {
+      "group": "2-warm",
+      "key": "incr",
+      "name": "增量预热（只多 nix:jq 的组合）",
+      "unit": "ms",
+      "samples": [
+        247.34341
+      ],
+      "n": 1,
+      "p50": 247.34341,
+      "p95": 247.34341,
+      "p99": 247.34341,
+      "max": 247.34341,
+      "min": 247.34341,
+      "status": "ok",
+      "note": "上传 3 个产物，1.15 MiB",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "2-warm",
+      "key": "guest.size",
+      "name": "guest 缓存占用（全部已预热组合）",
+      "unit": "MiB",
+      "samples": [
+        621.9348020553589
+      ],
+      "n": 1,
+      "p50": 621.9348020553589,
+      "p95": 621.9348020553589,
+      "p99": 621.9348020553589,
+      "max": 621.9348020553589,
+      "min": 621.9348020553589,
+      "status": "ok",
+      "note": "store 537 MiB / 22980 文件，bases 79 MiB",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "dirty",
+      "name": "首次启动前待写回的数据（Dirty + Writeback）",
+      "unit": "MiB",
+      "samples": [
+        0
+      ],
+      "n": 1,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "min": 0,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "first.total",
+      "name": "首次启动该组合（端到端，CLI）",
+      "unit": "ms",
+      "samples": [
+        956.111365
+      ],
+      "n": 1,
+      "p50": 956.111365,
+      "p95": 956.111365,
+      "p99": 956.111365,
+      "max": 956.111365,
+      "min": 956.111365,
+      "status": "ok",
+      "note": "compose 3.9 ms（cached=true），create 615 ms",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "mounts",
+      "name": "容器内挂载点数量",
+      "unit": "个",
+      "samples": [
+        142
+      ],
+      "n": 1,
+      "p50": 142,
+      "p95": 142,
+      "p99": 142,
+      "max": 142,
+      "min": 142,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "e2e",
+      "name": "端到端启动（热，CLI 墙钟）",
+      "unit": "ms",
+      "samples": [
+        548.816524,
+        592.546226,
+        555.437338,
+        526.037368,
+        452.734455,
+        447.632328,
+        445.18076,
+        511.985609,
+        633.897794,
+        647.610438
+      ],
+      "n": 10,
+      "p50": 526.037368,
+      "p95": 647.610438,
+      "p99": 647.610438,
+      "max": 647.610438,
+      "min": 445.18076,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "guest.total",
+      "name": "guest 内启动总耗时",
+      "unit": "ms",
+      "samples": [
+        439.371275,
+        447.418457,
+        442.235955,
+        421.263736,
+        343.732863,
+        351.164953,
+        341.0541,
+        332.041083,
+        500.972331,
+        440.835357
+      ],
+      "n": 10,
+      "p50": 421.263736,
+      "p95": 500.972331,
+      "p99": 500.972331,
+      "max": 500.972331,
+      "min": 332.041083,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "compose",
+      "name": "　组合（模板命中）",
+      "unit": "ms",
+      "samples": [
+        3.868229,
+        3.336179,
+        4.313607,
+        3.087124,
+        2.838839,
+        3.19021,
+        2.865029,
+        3.71367,
+        2.240928,
+        3.73113
+      ],
+      "n": 10,
+      "p50": 3.19021,
+      "p95": 4.313607,
+      "p99": 4.313607,
+      "max": 4.313607,
+      "min": 2.240928,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "instantiate",
+      "name": "　实例化（overlay + config.json）",
+      "unit": "ms",
+      "samples": [
+        2.709702,
+        3.040749,
+        2.859302,
+        2.297289,
+        2.207752,
+        1.996972,
+        1.852051,
+        2.237715,
+        2.249727,
+        2.058223
+      ],
+      "n": 10,
+      "p50": 2.237715,
+      "p95": 3.040749,
+      "p99": 3.040749,
+      "max": 3.040749,
+      "min": 1.852051,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "create",
+      "name": "　runc create",
+      "unit": "ms",
+      "samples": [
+        382.485274,
+        387.030824,
+        387.301249,
+        377.720074,
+        302.695594,
+        307.843734,
+        302.244209,
+        295.444602,
+        446.295269,
+        395.809314
+      ],
+      "n": 10,
+      "p50": 377.720074,
+      "p95": 446.295269,
+      "p99": 446.295269,
+      "max": 446.295269,
+      "min": 295.444602,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "start",
+      "name": "　runc start",
+      "unit": "ms",
+      "samples": [
+        48.423613,
+        51.98475,
+        43.973466,
+        36.471325,
+        34.310716,
+        37.797122,
+        33.757503,
+        30.285484,
+        49.315067,
+        38.85403
+      ],
+      "n": 10,
+      "p50": 37.797122,
+      "p95": 51.98475,
+      "p99": 51.98475,
+      "max": 51.98475,
+      "min": 30.285484,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "ready",
+      "name": "就绪等待（my-agent 启动到监听）",
+      "unit": "ms",
+      "samples": [
+        190.199593,
+        145.777676,
+        187.130417,
+        199.742076,
+        191.190431
+      ],
+      "n": 5,
+      "p50": 190.199593,
+      "p95": 199.742076,
+      "p99": 199.742076,
+      "max": 199.742076,
+      "min": 145.777676,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "4-start",
+      "key": "compose.cli",
+      "name": "warm compose（CLI 端到端，验收标准 \u003c1s）",
+      "unit": "ms",
+      "samples": [
+        77.025178,
+        47.721377,
+        71.447855,
+        52.521468,
+        70.13224,
+        46.916936,
+        54.856087,
+        52.825545,
+        68.509664,
+        58.519863
+      ],
+      "n": 10,
+      "p50": 54.856087,
+      "p95": 77.025178,
+      "p99": 77.025178,
+      "max": 77.025178,
+      "min": 46.916936,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "dirty",
+      "name": "开始时待写回的数据（Dirty + Writeback）",
+      "unit": "MiB",
+      "samples": [
+        0
+      ],
+      "n": 1,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "min": 0,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "fs.create",
+      "name": "文件系统：创建 5000 个小文件（overlay rootfs）",
+      "unit": "ms",
+      "samples": [
+        8010.2
+      ],
+      "n": 1,
+      "p50": 8010.2,
+      "p95": 8010.2,
+      "p99": 8010.2,
+      "max": 8010.2,
+      "min": 8010.2,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "fs.stat",
+      "name": "文件系统：stat 5000 次",
+      "unit": "ms",
+      "samples": [
+        189.7
+      ],
+      "n": 1,
+      "p50": 189.7,
+      "p95": 189.7,
+      "p99": 189.7,
+      "max": 189.7,
+      "min": 189.7,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "fs.chmod",
+      "name": "文件系统：chmod 5000 次（元数据写）",
+      "unit": "ms",
+      "samples": [
+        34.9
+      ],
+      "n": 1,
+      "p50": 34.9,
+      "p95": 34.9,
+      "p99": 34.9,
+      "max": 34.9,
+      "min": 34.9,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "fs.unlink",
+      "name": "文件系统：删除 5000 个文件",
+      "unit": "ms",
+      "samples": [
+        179.9
+      ],
+      "n": 1,
+      "p50": 179.9,
+      "p95": 179.9,
+      "p99": 179.9,
+      "max": 179.9,
+      "min": 179.9,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "fs.write256m",
+      "name": "顺序写 256 MiB + fsync",
+      "unit": "ms",
+      "samples": [
+        9787.1
+      ],
+      "n": 1,
+      "p50": 9787.1,
+      "p95": 9787.1,
+      "p99": 9787.1,
+      "max": 9787.1,
+      "min": 9787.1,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "store.readtree",
+      "name": "读取整个 python store path（只读 /nix/store）",
+      "unit": "ms",
+      "samples": [
+        1673.1
+      ],
+      "n": 1,
+      "p50": 1673.1,
+      "p95": 1673.1,
+      "p99": 1673.1,
+      "max": 1673.1,
+      "min": 1673.1,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "cpu.compileall",
+      "name": "编译 Python 标准库（CPU + 文件 IO）",
+      "unit": "ms",
+      "samples": [
+        6330.7
+      ],
+      "n": 1,
+      "p50": 6330.7,
+      "p95": 6330.7,
+      "p99": 6330.7,
+      "max": 6330.7,
+      "min": 6330.7,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "git.commit_clone",
+      "name": "git：1000 个文件 init/commit/clone",
+      "unit": "ms",
+      "samples": [
+        1624.1
+      ],
+      "n": 1,
+      "p50": 1624.1,
+      "p95": 1624.1,
+      "p99": 1624.1,
+      "max": 1624.1,
+      "min": 1624.1,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "node.start5",
+      "name": "node 冷启动 ×5",
+      "unit": "ms",
+      "samples": [
+        574.9
+      ],
+      "n": 1,
+      "p50": 574.9,
+      "p95": 574.9,
+      "p99": 574.9,
+      "max": 574.9,
+      "min": 574.9,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "python.start5",
+      "name": "python 启动并 import json/ssl/sqlite3 ×5",
+      "unit": "ms",
+      "samples": [
+        853.6
+      ],
+      "n": 1,
+      "p50": 853.6,
+      "p95": 853.6,
+      "p99": 853.6,
+      "max": 853.6,
+      "min": 853.6,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "net.connect",
+      "name": "容器 → 外网 TCP 建连（1.1.1.1:443，中位数）",
+      "unit": "ms",
+      "samples": [
+        6.1
+      ],
+      "n": 1,
+      "p50": 6.1,
+      "p95": 6.1,
+      "p99": 6.1,
+      "max": 6.1,
+      "min": 6.1,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "net.dns",
+      "name": "容器内 DNS 解析",
+      "unit": "ms",
+      "samples": [
+        21.9
+      ],
+      "n": 1,
+      "p50": 21.9,
+      "p95": 21.9,
+      "p99": 21.9,
+      "max": 21.9,
+      "min": 21.9,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "6-runtime",
+      "key": "pagecache.shared",
+      "name": "page cache 共享：第二个容器读同一 store path 新增缓存 / 第一个",
+      "unit": "%",
+      "samples": [
+        0
+      ],
+      "n": 1,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "min": 0,
+      "status": "ok",
+      "note": "第一个容器 +43 MiB，第二个 +0 MiB（越低越好）",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "mem.per",
+      "name": "每个空闲容器的内存开销（含 my-agent 进程）",
+      "unit": "MiB",
+      "samples": [
+        1.813671875
+      ],
+      "n": 1,
+      "p50": 1.813671875,
+      "p95": 1.813671875,
+      "p99": 1.813671875,
+      "max": 1.813671875,
+      "min": 1.813671875,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "disk.per",
+      "name": "每个容器的磁盘开销（实例目录）",
+      "unit": "KiB",
+      "samples": [
+        48.76640625
+      ],
+      "n": 1,
+      "p50": 48.76640625,
+      "p95": 48.76640625,
+      "p99": 48.76640625,
+      "max": 48.76640625,
+      "min": 48.76640625,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "mounts.per",
+      "name": "每个运行中容器增加的 guest 挂载数",
+      "unit": "个",
+      "samples": [
+        1
+      ],
+      "n": 1,
+      "p50": 1,
+      "p95": 1,
+      "p99": 1,
+      "max": 1,
+      "min": 1,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "start.loaded",
+      "name": "已有 9 个容器运行时的启动延迟（最后 3 个）",
+      "unit": "ms",
+      "samples": [
+        684.064218,
+        557.320984,
+        583.457172
+      ],
+      "n": 3,
+      "p50": 583.457172,
+      "p95": 684.064218,
+      "p99": 684.064218,
+      "max": 684.064218,
+      "min": 557.320984,
+      "status": "ok",
+      "note": "前 3 个：525/532/724 ms",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "concurrent",
+      "name": "同时启动 10 个容器：单个延迟",
+      "unit": "ms",
+      "samples": [
+        3970.466911,
+        4311.697866,
+        4568.876253,
+        4899.012533,
+        4993.735219,
+        5011.223109,
+        5111.350297,
+        5385.328301,
+        5400.29636,
+        5465.210003
+      ],
+      "n": 10,
+      "p50": 4993.735219,
+      "p95": 5465.210003,
+      "p99": 5465.210003,
+      "max": 5465.210003,
+      "min": 3970.466911,
+      "status": "ok",
+      "note": "全部完成 5471 ms，吞吐 1.8 个/s，失败 0",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "7-density",
+      "key": "bundles",
+      "name": "guest 已缓存 10+ 个组合后的启动延迟",
+      "unit": "ms",
+      "samples": [
+        560.355513,
+        577.590135,
+        555.092176,
+        583.615141,
+        613.135288
+      ],
+      "n": 5,
+      "p50": 577.590135,
+      "p95": 613.135288,
+      "p99": 613.135288,
+      "max": 613.135288,
+      "min": 555.092176,
+      "status": "ok",
+      "note": "guest 挂载 10 个，已挂载视图 5 个",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "8-correctness",
+      "key": "determinism",
+      "name": "确定性：3 种打乱顺序得到相同 digest",
+      "unit": "通过",
+      "samples": [
+        1
+      ],
+      "n": 1,
+      "p50": 1,
+      "p95": 1,
+      "p99": 1,
+      "max": 1,
+      "min": 1,
+      "status": "ok",
+      "lowerIsBetter": false
+    },
+    {
+      "group": "3-vm",
+      "key": "boot.warm",
+      "name": "虚拟机重启（数据盘已存在）",
+      "unit": "ms",
+      "samples": [
+        12741.457924
+      ],
+      "n": 1,
+      "p50": 12741.457924,
+      "p95": 12741.457924,
+      "p99": 12741.457924,
+      "max": 12741.457924,
+      "min": 12741.457924,
+      "status": "ok",
+      "lowerIsBetter": true
+    },
+    {
+      "group": "3-vm",
+      "key": "persist",
+      "name": "重启后缓存仍在（无需重新预热）",
+      "unit": "需上传产物数",
+      "samples": [
+        0
+      ],
+      "n": 1,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "min": 0,
+      "status": "ok",
+      "lowerIsBetter": true
+    }
+  ],
+  "notes": [
+    "phase switch failed: oar --json --bundle sha256:a1e55187ca90fad3e4ebd0d667e114fe752fec961a822c68edd0bce88c4f9a60 run --name svc: exit status 1: error: read response: EOF",
+    "phase snapshot failed: oar --json --bundle sha256:973da85635a33df4e7de1089f00ea89bbe24cca574ef3f3f17d3c5681df00425 run --name snap: signal: killed: ",
+    "phase correctness failed: oar --json --bundle sha256:94108b1a73d72e2104ef8fe5647c335d85a905e95e18587e575cc7951d22ae40 run --name cc: signal: killed: "
+  ]
+}
