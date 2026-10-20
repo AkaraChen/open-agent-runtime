@@ -216,7 +216,24 @@ func (s *Server) ingressList() proto.IngressList {
 		}
 	}
 	sort.Slice(res.Ingresses, func(i, j int) bool { return res.Ingresses[i].Port < res.Ingresses[j].Port })
+	if s.cfg.Mode == "vm" {
+		res.GuestIP = interfaceIPv4("eth0")
+	}
 	return res
+}
+
+func interfaceIPv4(name string) string {
+	ifi, err := net.InterfaceByName(name)
+	if err != nil {
+		return ""
+	}
+	addrs, _ := ifi.Addrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil {
+			return n.IP.String()
+		}
+	}
+	return ""
 }
 
 // handleDial connects the request stream to a TCP port inside the guest

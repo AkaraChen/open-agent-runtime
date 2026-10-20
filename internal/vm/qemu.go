@@ -77,6 +77,34 @@ type qemuMachine struct {
 	once    sync.Once
 	err     error
 	ready   chan struct{} // closed when the guest agent reports it listens
+	qmp     *qmpClient
+}
+
+// HostForward makes QEMU listen on 127.0.0.1:port and forward to the same
+// guest port (user networking). OAR_QEMU_FORWARD=vmm|channel overrides the
+// default (vmm with the TCP transport, channel with vsock).
+func (m *qemuMachine) HostForward(port int) error {
+	if m.qmp == nil {
+		return fmt.Errorf("no QMP socket")
+	}
+	// over vsock the control channel is fast; user networking (slirp) is
+	// the better path only where the channel itself is a port forward
+	switch os.Getenv("OAR_QEMU_FORWARD") {
+	case "channel":
+		return fmt.Errorf("disabled by OAR_QEMU_FORWARD=channel")
+	case "vmm":
+	default:
+		if m.tcpAddr == "" {
+			return fmt.Errorf("vsock transport: the control channel is used")
+		}
+	}
+	return m.qmp.hmp(fmt.Sprintf("hostfwd_add net0 tcp:127.0.0.1:%d-:%d", port, port))
+}
+
+func (m *qemuMachine) HostUnforward(port int) {
+	if m.qmp != nil {
+		m.qmp.hmp(fmt.Sprintf("hostfwd_remove net0 tcp:127.0.0.1:%d", port))
+	}
 }
 
 func freePort() (int, error) {
@@ -183,6 +211,14 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		"-monitor", "none",
 	}
 	args = append(args, transport...)
+	// QMP for runtime port forwarding; a short private directory keeps the
+	// socket path within the unix socket limit (104 bytes on macOS)
+	if qdir, err := os.MkdirTemp("/tmp", "oar-qmp-"); err == nil {
+		sock := filepath.Join(qdir, "qmp.sock")
+		args = append(args, "-qmp", "unix:"+sock+",server=on,wait=off")
+		m.qmp = &qmpClient{path: sock}
+		go func() { <-m.done; os.RemoveAll(qdir) }()
+	}
 	cmd := exec.Command(qemuBinary(arch), args...)
 	logPath := filepath.Join(cfg.Dir, "qemu.log")
 	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
@@ -193,6 +229,7 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	setDeathSignal(cmd)
 	if err := cmd.Start(); err != nil {
 		logf.Close()
+		m.once.Do(func() { close(m.done) }) // releases the QMP directory
 		return nil, err
 	}
 	m.cmd = cmd

@@ -173,6 +173,9 @@ type Ingress struct {
 // IngressList lists ingress ports.
 type IngressList struct {
 	Ingresses []Ingress `json:"ingresses"`
+	// GuestIP is the guest's address on its virtual network (vm mode), for
+	// backends whose host can reach it directly.
+	GuestIP string `json:"guestIP,omitempty"`
 }
 
 // NameArgs addresses a container by name.

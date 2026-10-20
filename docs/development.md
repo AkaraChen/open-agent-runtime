@@ -87,6 +87,7 @@ $ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
 | `OAR_IETS_LIB_URL`, `OAR_IETS_TARGET` | where `hack/fetch-iets.sh` downloads from; the Rust target `hack/build-iets.sh` builds for |
 | `OAR_RUNC` | runc binary for the native backend |
 | `OAR_QEMU`, `OAR_QEMU_ACCEL`, `OAR_QEMU_TRANSPORT` | QEMU binary, accelerator, `tcp` transport |
+| `OAR_QEMU_FORWARD`, `OAR_VZ_FORWARD` | `channel`: tunnel ingress ports through the control channel instead of QEMU's own port forwarding / a direct connection to the VZ guest |
 | `OAR_QEMU_MACHINE` | `q35` or `microvm`: machine type for amd64 guests (default: `microvm` with KVM, `q35` otherwise) |
 | `OAR_GUEST_CMDLINE` | extra guest kernel parameters (QEMU and VZ backends; debugging) |
 | `OAR_STORE_VIEW` | `binds`: containers see their closure through one bind mount per store path instead of a hard-link tree (read at `vm start`; for comparisons) |

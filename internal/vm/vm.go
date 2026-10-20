@@ -318,7 +318,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 
 	pool := newConnPool(ctx, m, 4)
 	if b.NeedsGuestImage() {
-		go forwardIngress(ctx, &proto.Client{Dial: pool.get}, log)
+		go forwardIngress(ctx, &proto.Client{Dial: pool.get}, m, log)
 	}
 	go func() {
 		for {

@@ -177,6 +177,10 @@ func (m *vzMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 
 func (m *vzMachine) Done() <-chan struct{} { return m.done }
 
+// GuestNetwork reports that the guest's NAT address is reachable from the
+// host, so ingress ports are proxied to it directly.
+func (m *vzMachine) GuestNetwork() bool { return os.Getenv("OAR_VZ_FORWARD") != "channel" }
+
 func (m *vzMachine) Kill() error {
 	if m.vm.CanStop() {
 		if err := m.vm.Stop(); err != nil {

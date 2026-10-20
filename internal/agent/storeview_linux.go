@@ -259,15 +259,14 @@ func unescapeMountinfo(s string) string {
 	return b.String()
 }
 
-// flushCache writes the cache disk's dirty data back at the end of a warm
-// (VM guests only: the disk is the guest's own). Otherwise the first start
-// after a warm pays for it: with ext4's data=ordered journaling, the next
-// journal commit must write all of it first, and metadata operations such
-// as creating the instance's overlay directories wait for that commit.
+// flushCache writes the cache filesystem's dirty data back at the end of a
+// warm. Otherwise the first start after a warm pays for it: with ext4's
+// data=ordered journaling, the next journal commit must write all of it
+// first, and metadata operations such as creating the instance's overlay
+// directories wait for that commit. On the native backend this flushes the
+// host filesystem holding the cache, which the kernel would write back
+// within seconds anyway.
 func (s *Server) flushCache() {
-	if s.cfg.Mode != "vm" {
-		return
-	}
 	f, err := os.Open(s.cfg.Root)
 	if err != nil {
 		return
