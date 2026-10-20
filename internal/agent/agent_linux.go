@@ -36,10 +36,13 @@ var Version = "0.1.0"
 
 // Config configures an agent.
 type Config struct {
-	Root     string // cache + state directory, e.g. /var/lib/oar
-	Runc     Runc
-	Mode     string // "vm" or "native"
-	Shutdown func() // invoked by the shutdown op (vm mode)
+	Root string // cache + state directory, e.g. /var/lib/oar
+	Runc Runc
+	Mode string // "vm" or "native"
+	// StoreView selects compose.Layout.StoreMode ("links" or "binds"); in
+	// vm mode it defaults to the oar.storeview kernel parameter.
+	StoreView string
+	Shutdown  func() // invoked by the shutdown op (vm mode)
 }
 
 // Server implements the agent protocol.
@@ -70,7 +73,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Runc.Root == "" {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
-	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
+	mode := cfg.StoreView
+	if mode == "" && cfg.Mode == "vm" {
+		mode = cmdlineParam("oar.storeview")
+	}
+	if mode == "links" {
+		mode = ""
+	}
+	if mode != "" && mode != "binds" {
+		return nil, fmt.Errorf("unknown store view mode %q", mode)
+	}
+	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root, StoreMode: mode}, booted: time.Now()}
 	for _, d := range []string{cfg.Root, s.layout.Tmp(), s.layout.InstancesDir(), s.layout.StoreLayers(), cfg.Runc.Root,
 		filepath.Join(cfg.Root, "bases"), filepath.Join(cfg.Root, "components"), filepath.Join(cfg.Root, "bundles")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -133,6 +146,9 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		if err := s.ensureStoreView(res.Bundle); err != nil {
 			return nil, err
+		}
+		if a.Flush {
+			s.flushCache()
 		}
 		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers}, nil
 	case proto.OpRun, proto.OpReload:

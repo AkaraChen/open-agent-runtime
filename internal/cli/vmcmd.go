@@ -173,7 +173,7 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 	}
 	cfg := vm.MachineConfig{
 		Name: g.vmName, Dir: dir, Arch: o.arch, CPUs: o.cpus, MemoryMiB: o.memory, DiskGiB: o.disk,
-		Root: o.root, ConsoleLog: filepath.Join(dir, "console.log"),
+		Root: o.root, ConsoleLog: filepath.Join(dir, "console.log"), StoreView: os.Getenv("OAR_STORE_VIEW"),
 	}
 	if b.NeedsGuestImage() {
 		cfg.Kernel, cfg.Initrd, err = vm.GuestImage(home, o.arch, o.guestDir)

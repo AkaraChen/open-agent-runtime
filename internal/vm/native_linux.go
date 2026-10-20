@@ -58,9 +58,10 @@ func (native) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		root = agent.GuestRoot
 	}
 	srv, err := agent.New(agent.Config{
-		Root: root,
-		Mode: "native",
-		Runc: agent.Runc{Binary: runcBinary(), Root: "/run/oar/runc"},
+		Root:      root,
+		Mode:      "native",
+		StoreView: cfg.StoreView,
+		Runc:      agent.Runc{Binary: runcBinary(), Root: "/run/oar/runc"},
 	})
 	if err != nil {
 		return nil, err

@@ -20,7 +20,14 @@ import (
 )
 
 // Layout describes the guest cache directory.
-type Layout struct{ Root string }
+type Layout struct {
+	Root string
+	// StoreMode is how containers see their closure under /nix/store:
+	// "links" (default): one bind of a per-closure hard-link tree;
+	// "binds": one bind per store path, made by runc inside the container's
+	// mount namespace onto a per-closure skeleton of empty directories.
+	StoreMode string
+}
 
 func hexOf(key string) string {
 	_, h, ok := strings.Cut(key, ":")
@@ -38,7 +45,12 @@ func (l Layout) BaseDir(key string) string {
 // StoreView is the read-only /nix/store view of a closure (a hard-link tree
 // of its store paths), bind-mounted into containers. Views are keyed by
 // closure, so bundles that differ only outside /nix/store share one.
-func (l Layout) StoreView(closure string) string { return filepath.Join(l.Root, "views", closure) }
+func (l Layout) StoreView(closure string) string {
+	if l.StoreMode == "binds" {
+		return filepath.Join(l.Root, "skeletons", closure)
+	}
+	return filepath.Join(l.Root, "views", closure)
+}
 
 // ClosureKey identifies a closure by its store path names.
 func ClosureKey(pl *manifest.PlatformLock) string {
@@ -105,6 +117,7 @@ type Bundle struct {
 	// name), linked by the agent into the read-only StoreView.
 	StoreLayers []string `json:"storeLayers,omitempty"`
 	StoreView   string   `json:"storeView,omitempty"`
+	StoreMode   string   `json:"storeMode,omitempty"`
 	// Layers are the other overlay lower directories, highest priority
 	// first: component trees, then the base rootfs (last).
 	Layers []string    `json:"layers"`
@@ -133,7 +146,7 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	cachePath := filepath.Join(l.BundleDir(want), "bundle.json")
 	if b, err := os.ReadFile(cachePath); err == nil {
 		var cached Bundle
-		if json.Unmarshal(b, &cached) == nil && cached.Digest == want && cached.Format == templateFormat {
+		if json.Unmarshal(b, &cached) == nil && cached.Digest == want && cached.Format == templateFormat && cached.StoreMode == l.StoreMode {
 			if err := checkWarm(l, pl); err == nil {
 				return &Result{Bundle: &cached, Cached: true}, nil
 			}
@@ -147,7 +160,7 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	}
 	b := &Bundle{Format: templateFormat, Digest: want, Layers: Layers(l, pl), StoreLayers: StoreLayers(l, pl), Spec: Spec(l, pl)}
 	if len(pl.StorePaths) > 0 {
-		b.StoreView = l.StoreView(ClosureKey(pl))
+		b.StoreView, b.StoreMode = l.StoreView(ClosureKey(pl)), l.StoreMode
 	}
 	data, err := json.Marshal(b)
 	if err != nil {
@@ -307,6 +320,19 @@ func Spec(l Layout, pl *manifest.PlatformLock) *specs.Spec {
 			Destination: "/nix/store", Type: "bind", Source: l.StoreView(ClosureKey(pl)),
 			Options: []string{"bind", "ro", "nosuid", "nodev"},
 		})
+		if l.StoreMode == "binds" {
+			names := make([]string, 0, len(pl.StorePaths))
+			for _, sp := range pl.StorePaths {
+				names = append(names, sp.Name())
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				s.Mounts = append(s.Mounts, specs.Mount{
+					Destination: "/nix/store/" + n, Type: "bind", Source: l.StorePath(n),
+					Options: []string{"bind", "ro", "nosuid", "nodev"},
+				})
+			}
+		}
 	}
 	return s
 }

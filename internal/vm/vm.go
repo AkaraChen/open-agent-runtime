@@ -36,6 +36,9 @@ type MachineConfig struct {
 	Root string `json:"root,omitempty"`
 	// ConsoleLog receives the guest serial console.
 	ConsoleLog string `json:"consoleLog"`
+	// StoreView is the agent's store view mode (OAR_STORE_VIEW; benchmark
+	// comparisons), passed to guests as the oar.storeview kernel parameter.
+	StoreView string `json:"storeView,omitempty"`
 }
 
 // Machine is a running guest.

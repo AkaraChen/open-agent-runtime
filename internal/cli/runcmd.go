@@ -235,11 +235,11 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 }
 
 // precompose builds the bundle template and its /nix/store view in the
-// guest, so the first start of a freshly warmed bundle is as fast as later
-// ones.
+// guest and writes the warmed data back to the guest's disk, so the first
+// start of a freshly warmed bundle is as fast as later ones.
 func (s *session) precompose(ctx context.Context) error {
 	var res proto.ComposeResult
-	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock}, &res)
+	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: true}, &res)
 }
 
 func firstNonEmpty(a, b string) string {

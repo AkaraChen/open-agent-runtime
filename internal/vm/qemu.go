@@ -124,6 +124,9 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	useVsock := vsockAvailable()
 	m := &qemuMachine{done: make(chan struct{})}
 	cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
+	if cfg.StoreView != "" {
+		cmdline += " oar.storeview=" + cfg.StoreView
+	}
 	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
 		cmdline += " " + extra
 	}

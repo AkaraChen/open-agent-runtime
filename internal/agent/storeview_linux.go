@@ -63,6 +63,15 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
+	if b.StoreMode == "binds" {
+		// a skeleton: runc binds each store path onto its directory
+		for _, layer := range b.StoreLayers {
+			if err := os.Mkdir(filepath.Join(tmp, filepath.Base(layer)), 0o555); err != nil {
+				return err
+			}
+		}
+		return s.publishView(tmp, view, done)
+	}
 	// store paths are linked in parallel: the cost is one syscall per file
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
@@ -94,6 +103,11 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 	if err := <-errs; err != nil {
 		return err
 	}
+	return s.publishView(tmp, view, done)
+}
+
+// publishView moves a completed view into place (caller holds groups.mu).
+func (s *Server) publishView(tmp, view, done string) error {
 	os.Chmod(tmp, 0o755)
 	if err := os.Rename(tmp, view); err != nil {
 		return err
@@ -243,4 +257,21 @@ func unescapeMountinfo(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// flushCache writes the cache disk's dirty data back at the end of a warm
+// (VM guests only: the disk is the guest's own). Otherwise the first start
+// after a warm pays for it: with ext4's data=ordered journaling, the next
+// journal commit must write all of it first, and metadata operations such
+// as creating the instance's overlay directories wait for that commit.
+func (s *Server) flushCache() {
+	if s.cfg.Mode != "vm" {
+		return
+	}
+	f, err := os.Open(s.cfg.Root)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	unix.Syncfs(int(f.Fd()))
 }

@@ -46,8 +46,15 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		return nil, fmt.Errorf("vz can only run %s guests on this Mac", runtime.GOARCH)
 	}
 	console := "hvc0"
+	cmdline := "console=" + console + " panic=-1 quiet loglevel=3"
+	if cfg.StoreView != "" {
+		cmdline += " oar.storeview=" + cfg.StoreView
+	}
+	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
+		cmdline += " " + extra
+	}
 	boot, err := vz.NewLinuxBootLoader(cfg.Kernel,
-		vz.WithCommandLine("console="+console+" panic=-1 quiet loglevel=3"),
+		vz.WithCommandLine(cmdline),
 		vz.WithInitrd(cfg.Initrd))
 	if err != nil {
 		return nil, fmt.Errorf("boot loader: %w", err)

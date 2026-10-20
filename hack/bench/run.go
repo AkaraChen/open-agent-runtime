@@ -774,6 +774,9 @@ func (b *bench) rm(name string) {
 
 func (b *bench) phaseStart() error {
 	const g = "4-start"
+	if st, err := b.stats(); err == nil {
+		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(st.Dirty)/(1<<20))
+	}
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err

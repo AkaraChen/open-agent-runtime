@@ -86,6 +86,8 @@ type WarmPutArgs struct {
 // ComposeArgs composes a bundle from a platform lock.
 type ComposeArgs struct {
 	Lock *manifest.PlatformLock `json:"lock"`
+	// Flush writes the guest cache back before returning (end of a warm).
+	Flush bool `json:"flush,omitempty"`
 }
 
 // ComposeResult reports the composed bundle.
