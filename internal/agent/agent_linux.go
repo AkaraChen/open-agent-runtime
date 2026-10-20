@@ -207,6 +207,9 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
+		if a.Sync {
+			unix.Sync()
+		}
 		if a.DropCaches {
 			if s.cfg.Mode != "vm" {
 				return nil, fmt.Errorf("dropping caches is only allowed inside the guest VM")
@@ -380,6 +383,7 @@ type instance struct {
 	Ports       map[string]int  `json:"ports,omitempty"`
 	PublicPorts []manifest.Port `json:"publicPorts,omitempty"`
 	dir         string
+	viewTime    time.Duration // ensureStoreView in createInstance (timings)
 }
 
 func (s *Server) instDir(id string) string { return filepath.Join(s.layout.InstancesDir(), id) }
@@ -490,6 +494,7 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		Strategy: a.Strategy,
 		Timings: proto.Timings{
 			Compose:     tCompose.Sub(t0),
+			StoreView:   in.viewTime,
 			Instantiate: tInst.Sub(tCompose),
 			Create:      tCreate.Sub(tInst),
 		},
@@ -618,10 +623,12 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	if err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
+	tView := time.Now()
 	if err := s.ensureStoreView(res.Bundle); err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
 	tCompose := time.Now()
+	viewTime := tCompose.Sub(tView)
 	ports, err := allocatePorts(a.Lock.Ports)
 	if err != nil {
 		return nil, false, tCompose, time.Time{}, err
@@ -632,6 +639,7 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	}
 	in, err := s.instantiate(name, res.Bundle, env, func(in *instance) {
 		in.Ports, in.PublicPorts = ports, a.Lock.Ports
+		in.viewTime = viewTime
 	})
 	if err != nil {
 		return nil, false, tCompose, time.Time{}, err

@@ -116,7 +116,9 @@ func TestIngressListLongPoll(t *testing.T) {
 	}
 	// the current version waits until the list changes
 	got := make(chan proto.IngressList)
-	go func() { got <- s.ingressWait(context.Background(), proto.IngressListArgs{Version: v0, Wait: time.Minute}) }()
+	go func() {
+		got <- s.ingressWait(context.Background(), proto.IngressListArgs{Version: v0, Wait: time.Minute})
+	}()
 	select {
 	case <-got:
 		t.Fatal("returned before a change")

@@ -46,6 +46,9 @@ type StatsArgs struct {
 	// DropCaches drops the guest page cache first (vm mode only), so cache
 	// growth can be measured.
 	DropCaches bool `json:"dropCaches,omitempty"`
+	// Sync writes dirty pages back first, so a following measurement does
+	// not pay for earlier writes.
+	Sync bool `json:"sync,omitempty"`
 }
 
 // StatsResult is a snapshot of guest resource usage, for benchmarks and
@@ -60,8 +63,11 @@ type StatsResult struct {
 	MemTotal     int64            `json:"memTotal"`
 	MemAvailable int64            `json:"memAvailable"`
 	Cached       int64            `json:"cached"`
-	Uptime       float64          `json:"uptime"`
-	Load1        float64          `json:"load1"`
+	Dirty        int64            `json:"dirty"`     // page cache waiting for writeback
+	Writeback    int64            `json:"writeback"` // being written back
+
+	Uptime float64 `json:"uptime"`
+	Load1  float64 `json:"load1"`
 	// Boot holds guest uptimes (seconds) at boot milestones (vm mode).
 	Boot map[string]float64 `json:"boot,omitempty"`
 }
@@ -118,7 +124,10 @@ type RunArgs struct {
 
 // Timings of a run, all measured inside the guest.
 type Timings struct {
-	Compose     time.Duration `json:"compose"`
+	Compose time.Duration `json:"compose"`
+	// StoreView is the part of Compose spent mounting the bundle's
+	// /nix/store view (zero when it was already mounted).
+	StoreView   time.Duration `json:"storeView,omitempty"`
 	Instantiate time.Duration `json:"instantiate"`
 	Create      time.Duration `json:"create"`
 	Start       time.Duration `json:"start"`

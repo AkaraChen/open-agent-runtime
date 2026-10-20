@@ -222,10 +222,14 @@ func (b *bench) client() *proto.Client { return vm.Client(vm.Dir(b.home, "defaul
 func (b *bench) stats() (proto.StatsResult, error) { return b.statsOpt(false) }
 
 func (b *bench) statsOpt(drop bool) (proto.StatsResult, error) {
+	return b.statsArgs(proto.StatsArgs{DropCaches: drop})
+}
+
+func (b *bench) statsArgs(a proto.StatsArgs) (proto.StatsResult, error) {
 	var st proto.StatsResult
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	err := b.client().Call(ctx, proto.OpStats, proto.StatsArgs{DropCaches: drop}, &st)
+	err := b.client().Call(ctx, proto.OpStats, a, &st)
 	return st, err
 }
 
@@ -674,12 +678,14 @@ func parseCPUTime(s string) float64 {
 // ---- phase 2: warm ----
 
 type warmOut struct {
-	Total     int     `json:"total"`
-	Uploaded  int     `json:"uploaded"`
-	Bytes     int64   `json:"bytes"`
-	Files     int64   `json:"files"`
-	Duration  float64 `json:"duration"`
-	GuestTime float64 `json:"guestTime"`
+	Total      int     `json:"total"`
+	Uploaded   int     `json:"uploaded"`
+	Bytes      int64   `json:"bytes"`
+	Files      int64   `json:"files"`
+	Duration   float64 `json:"duration"`
+	GuestTime  float64 `json:"guestTime"`
+	Status     float64 `json:"status"`
+	Precompose float64 `json:"precompose"`
 }
 
 func (b *bench) phaseWarm() error {
@@ -696,7 +702,8 @@ func (b *bench) phaseWarm() error {
 	var wb warmOut
 	wall, err = b.oarJSON(&wb, "--bundle", b.digests["b"], "warm")
 	if err == nil {
-		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB", wb.Uploaded, float64(wb.Bytes)/(1<<20))
+		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms，CLI 总计 %.1f ms",
+			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.Duration/1e6)
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing"} {
 		if _, err := b.oarJSON(nil, "--bundle", b.digests[name], "warm"); err != nil {
@@ -723,7 +730,7 @@ type runOut struct {
 		Container proto.Container `json:"container"`
 		Cached    bool            `json:"cached"`
 		Timings   struct {
-			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Total float64
+			Compose, StoreView, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Total float64
 		} `json:"timings"`
 		Replaced string `json:"replaced"`
 	} `json:"result"`
@@ -750,15 +757,48 @@ func (b *bench) rm(name string) {
 	}
 }
 
+// joinMs formats samples as "a / b / c".
+func joinMs(v []float64) string {
+	var parts []string
+	for _, x := range v {
+		parts = append(parts, fmt.Sprintf("%.1f", x))
+	}
+	return strings.Join(parts, " / ")
+}
+
 func (b *bench) phaseStart() error {
 	const g = "4-start"
+	pre, _ := b.stats()
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err
 	}
 	t := first.Result.Timings
-	b.add(g, "first.total", "首次启动该组合（端到端，CLI）", "ms", true, ms(wall)).Note =
-		fmt.Sprintf("compose %.1f ms（cached=%v），create %.0f ms", t.Compose/1e6, first.Result.Cached, t.Create/1e6)
+	b.add(g, "first.total", "首次启动该组合（端到端，CLI，紧接预热之后）", "ms", true, ms(wall)).Note =
+		fmt.Sprintf("compose %.1f ms（其中挂载 store 视图 %.1f ms，cached=%v），create %.0f ms；启动前 guest 脏页 %.0f MiB、写回中 %.0f MiB，挂载 %d 个，视图 %d 个",
+			t.Compose/1e6, t.StoreView/1e6, first.Result.Cached, t.Create/1e6,
+			float64(pre.Dirty)/(1<<20), float64(pre.Writeback)/(1<<20), pre.Mounts, pre.StoreViews)
+	// the same for combos that were warmed but never started, after the
+	// guest wrote its dirty pages back: separates first-start cost from
+	// the write-back of the preceding warm
+	var settled, sCompose, sView, sCreate []float64
+	for _, name := range []string{"nogit", "hello", "ing-b"} {
+		if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+			return err
+		}
+		r, wall, err := b.run("f-"+name, b.digests[name])
+		if err != nil {
+			return err
+		}
+		t := r.Result.Timings
+		settled = append(settled, ms(wall))
+		sCompose = append(sCompose, t.Compose/1e6)
+		sView = append(sView, t.StoreView/1e6)
+		sCreate = append(sCreate, t.Create/1e6)
+		b.rm("f-" + name)
+	}
+	b.add(g, "first.settled", "首次启动该组合（脏页已写回，3 个组合）", "ms", true, settled...).Note =
+		fmt.Sprintf("compose %s ms（其中挂载 store 视图 %s ms），create %s ms", joinMs(sCompose), joinMs(sView), joinMs(sCreate))
 	mounts, _ := b.exec("s0", "sh", "-c", "wc -l < /proc/self/mountinfo")
 	if n, err := strconv.Atoi(strings.TrimSpace(mounts)); err == nil {
 		b.add(g, "mounts", "容器内挂载点数量", "个", true, float64(n))
@@ -999,14 +1039,14 @@ func (b *bench) phaseDensity() error {
 	// concurrent starts
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var conc []float64
+	var conc, cCompose, cInst, cCreate, cStart, cGuest []float64
 	var errs []string
 	t := time.Now()
 	for i := 0; i < k; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, d, err := b.run(fmt.Sprintf("c%d", i), b.digests["idle"])
+			r, d, err := b.run(fmt.Sprintf("c%d", i), b.digests["idle"])
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -1014,13 +1054,21 @@ func (b *bench) phaseDensity() error {
 				return
 			}
 			conc = append(conc, ms(d))
+			t := r.Result.Timings
+			cCompose = append(cCompose, t.Compose/1e6)
+			cInst = append(cInst, t.Instantiate/1e6)
+			cCreate = append(cCreate, t.Create/1e6)
+			cStart = append(cStart, t.Start/1e6)
+			cGuest = append(cGuest, t.Total/1e6)
 		}(i)
 	}
 	wg.Wait()
 	allWall := time.Since(t)
 	if len(conc) > 0 {
 		b.add(g, "concurrent", fmt.Sprintf("同时启动 %d 个容器：单个延迟", k), "ms", true, conc...).Note =
-			fmt.Sprintf("全部完成 %.0f ms，吞吐 %.1f 个/s，失败 %d", ms(allWall), float64(len(conc))/allWall.Seconds(), len(errs))
+			fmt.Sprintf("全部完成 %.0f ms，吞吐 %.1f 个/s，失败 %d；guest 内中位数：总计 %.0f ms = compose %.1f + 实例化 %.1f + runc create %.0f + runc start %.0f ms",
+				ms(allWall), float64(len(conc))/allWall.Seconds(), len(errs),
+				median(cGuest), median(cCompose), median(cInst), median(cCreate), median(cStart))
 	}
 	for i := 0; i < k; i++ {
 		b.rm(fmt.Sprintf("c%d", i))
