@@ -29,5 +29,9 @@ fi
 echo ">> building $KIMAGE ($KARCH, $(nproc) jobs)"
 $M -j"$(nproc)" "$KIMAGE" >/dev/null
 cp "$B/$KPATH" /out/kernel
+if [ "$KARCH" = x86_64 ]; then
+  grep -q "^CONFIG_PVH=y" "$B/.config" || { echo "missing CONFIG_PVH=y" >&2; exit 1; }
+  cp "$B/vmlinux" /out/vmlinux # PVH boot (Cloud Hypervisor evaluation)
+fi
 cp "$B/.config" /out/kernel.config
 echo ">> kernel: $(du -h /out/kernel | cut -f1)"
