@@ -792,6 +792,13 @@ func (b *bench) phaseStart() error {
 		}
 		t := r.Result.Timings
 		settled = append(settled, ms(wall))
+		if out, _, err := b.oarCmd("logs", "--name", "f-"+name); err == nil {
+			for _, l := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(l, "DIAG") {
+					b.add(g, "diag."+name, "DIAG "+name+" runc create 内核栈", "个", true, 0).Note = l
+				}
+			}
+		}
 		sCompose = append(sCompose, t.Compose/1e6)
 		sView = append(sView, t.StoreView/1e6)
 		sCreate = append(sCreate, t.Create/1e6)
@@ -799,6 +806,13 @@ func (b *bench) phaseStart() error {
 	}
 	b.add(g, "first.settled", "首次启动该组合（脏页已写回，3 个组合）", "ms", true, settled...).Note =
 		fmt.Sprintf("compose %s ms（其中挂载 store 视图 %s ms），create %s ms", joinMs(sCompose), joinMs(sView), joinMs(sCreate))
+	if out, _, err := b.oarCmd("logs", "--name", "s0"); err == nil {
+		for _, l := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(l, "DIAG") {
+				b.add(g, "diag.s0", "DIAG s0 runc create 内核栈", "个", true, 0).Note = l
+			}
+		}
+	}
 	mounts, _ := b.exec("s0", "sh", "-c", "wc -l < /proc/self/mountinfo")
 	if n, err := strconv.Atoi(strings.TrimSpace(mounts)); err == nil {
 		b.add(g, "mounts", "容器内挂载点数量", "个", true, float64(n))

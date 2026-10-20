@@ -62,7 +62,13 @@ func (r *Runc) Create(ctx context.Context, id, bundle string, log *os.File) erro
 	// same fd, so tee setup errors through a buffer only on failure.
 	c.Stderr = log
 	off, _ := log.Seek(0, 2)
-	if err := c.Run(); err != nil {
+	stop := make(chan struct{})
+	res := make(chan string, 1)
+	go func() { res <- sampleRunc(stop) }()
+	err = c.Run()
+	close(stop)
+	fmt.Fprintf(log, "%s\n", <-res)
+	if err != nil {
 		tail := make([]byte, 4096)
 		n, _ := log.ReadAt(tail, off)
 		stderr.Write(tail[:n])
