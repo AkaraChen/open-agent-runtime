@@ -1,0 +1,66 @@
+name: boot-profile
+
+# Boots the guest once on KVM with initcall_debug and prints where the
+# kernel spends its boot time (slowest initcalls, timeline milestones).
+on:
+  workflow_dispatch:
+    inputs:
+      cmdline:
+        description: extra kernel command line
+        default: ""
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: kernel cache
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: guest/out/amd64/kernel*
+          key: kernel-amd64-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
+      - if: steps.kcache.outputs.cache-hit != 'true'
+        run: guest/build.sh amd64 kernel
+      - run: guest/build.sh amd64 initramfs
+      - name: enable kvm and vhost-vsock
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock && sudo chmod 666 /dev/vhost-vsock
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - run: CGO_ENABLED=0 go build -o bin/oar ./cmd/oar
+      - name: boot with initcall_debug
+        env:
+          OAR_HOME: ${{ runner.temp }}/oar
+          OAR_GUEST_DIR: ${{ github.workspace }}/guest/out
+        run: |
+          for run in plain debug; do
+            extra="${{ github.event.inputs.cmdline }}"
+            [ $run = debug ] && extra="$extra initcall_debug loglevel=8 printk.time=1"
+            OAR_GUEST_CMDLINE="$extra" bin/oar vm start --backend kvm --cpus 2 --memory 4096
+            cp "$OAR_HOME/vms/default/console.log" "console-$run.log"
+            echo "== $run: phases (ms since start)"
+            jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_HOME/vms/default/state.json"
+            bin/oar vm stats | sed -n '1,12p'
+            bin/oar vm stop
+            rm -f "$OAR_HOME/vms/default/data.img"
+          done
+          echo "== slowest initcalls (usecs)"
+          grep -oE "initcall [^ ]+ returned [-0-9]+ after [0-9]+ usecs" console-debug.log |
+            awk '{print $6, $2}' | sort -rn | head -40
+          grep -oE "initcall [^ ]+ returned [-0-9]+ after [0-9]+ usecs" console-debug.log |
+            awk '{s+=$6} END {print "total:", s, "usecs"}'
+          echo "== milestones"
+          grep -E "Linux version|Unpacking initramfs|Freeing initrd|Freeing unused kernel|Run /init|oar-init" console-debug.log | head -20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-profile
+          path: console-*.log
