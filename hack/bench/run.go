@@ -554,6 +554,13 @@ func (b *bench) phaseVM() error {
 		b.add(g, "boot.cli", "　其中：CLI 拉起 supervisor 进程（含 daemonize）", "ms", true, math.Max(0, ms(wall)-ready))
 		b.add(g, "boot.machine", "　其中：后端创建并启动虚拟机（Boot 返回）", "ms", true, ms(vs.Phases["machineStarted"]))
 		b.add(g, "boot.reach", "　其中：虚拟机启动后到 agent 首次可达", "ms", true, ms(vs.Phases["agentReachable"]-vs.Phases["machineStarted"]))
+		// host-side arrival of guest console markers
+		if t, ok := vs.Phases["consoleInit"]; ok {
+			b.add(g, "boot.toinit", "　宿主机看到 guest init 启动（VMM + 固件 + 内核解压 + 内核启动）", "ms", true, ms(t))
+		}
+		if t, ok := vs.Phases["consoleAgent"]; ok {
+			b.add(g, "boot.detect", "　guest agent 开始监听到宿主机连上（探测延迟）", "ms", true, math.Max(0, ms(vs.Phases["agentReachable"]-t)))
+		}
 	}
 	st, err := b.stats()
 	if err != nil {

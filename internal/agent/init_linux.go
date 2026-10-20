@@ -36,6 +36,9 @@ func RunInit() {
 		unix.Dup2(int(console.Fd()), 2)
 	}
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	if os.Getenv("OAR_SWITCHED_ROOT") != "1" {
+		logInit("init started") // timestamped by the host (boot phases)
+	}
 	// leave the initramfs so that pivot_root works (runc, CRIU restore)
 	switchRoot()
 	pivot := os.Getenv("OAR_SWITCHED_ROOT") == "1"

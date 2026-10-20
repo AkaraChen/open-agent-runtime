@@ -217,6 +217,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	}
 	fmt.Fprintf(log, "booting %s guest %q (%s, %d cpus, %d MiB)\n", b.Name(), cfg.Name, cfg.Arch, cfg.CPUs, cfg.MemoryMiB)
 	st.Phases = map[string]time.Duration{}
+	os.Remove(cfg.ConsoleLog) // the previous boot's markers must not match
+	stopWatch := watchConsole(cfg.ConsoleLog, st.Started)
+	defer stopWatch()
 	m, err := b.Boot(ctx, cfg)
 	st.Phases["machineStarted"] = time.Since(st.Started)
 	if err != nil {
@@ -257,6 +260,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		}
 	}
 	st.Boot = time.Since(st.Started)
+	for phase, at := range stopWatch() {
+		st.Phases[phase] = at
+	}
 	st.Phases["agentReachable"] = st.Boot
 	fmt.Fprintf(log, "guest ready in %s: kernel %s, %s\n", st.Boot.Round(time.Millisecond), info.Kernel, info.Runc)
 
@@ -386,4 +392,58 @@ func EnsureDisk(p string, gib int) error {
 	}
 	defer f.Close()
 	return f.Truncate(int64(gib) << 30)
+}
+
+// consoleMarkers are guest init messages whose arrival on the host is
+// recorded as boot phases: they split the boot into the part before the
+// guest's own clock starts (VMM, firmware, kernel decompression), the
+// guest's boot, and the delay until the host reaches the agent.
+var consoleMarkers = map[string]string{
+	"[oar-init] init started": "consoleInit",
+	" listening on ":          "consoleAgent", // the agent accepts connections
+}
+
+// watchConsole polls the console log during boot for the markers. The
+// returned function stops it and returns when each marker first appeared.
+func watchConsole(path string, start time.Time) func() map[string]time.Duration {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	seen := map[string]time.Duration{}
+	go func() {
+		defer close(finished)
+		var off int64
+		var partial string
+		for {
+			if f, err := os.Open(path); err == nil {
+				f.Seek(off, io.SeekStart)
+				b, _ := io.ReadAll(f)
+				f.Close()
+				off += int64(len(b))
+				now := time.Since(start)
+				lines := strings.Split(partial+string(b), "\n")
+				partial = lines[len(lines)-1]
+				for _, line := range lines[:len(lines)-1] {
+					for marker, phase := range consoleMarkers {
+						if _, ok := seen[phase]; !ok && strings.Contains(line, marker) {
+							seen[phase] = now
+						}
+					}
+				}
+				if len(seen) == len(consoleMarkers) {
+					return
+				}
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+	var once sync.Once
+	return func() map[string]time.Duration {
+		once.Do(func() { close(done) })
+		<-finished
+		return seen
+	}
 }
