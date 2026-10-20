@@ -828,7 +828,7 @@ func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, 
 			return nil, err
 		}
 	}
-	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
+	opts := fmt.Sprintf("volatile,lowerdir=%s,upperdir=%s,workdir=%s",
 		strings.Join(b.Layers, ":"), filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work"))
 	if err := unix.Mount("overlay", filepath.Join(in.dir, "rootfs"), "overlay", 0, opts); err != nil {
 		os.RemoveAll(in.dir)

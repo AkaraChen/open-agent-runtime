@@ -771,9 +771,7 @@ func (b *bench) phaseStart() error {
 	pre, _ := b.stats()
 	// DIAG: how long the guest needs to write back what warm left, and
 	// whether the first start is still slow afterwards
-	tSync := time.Now()
-	b.statsArgs(proto.StatsArgs{Sync: true})
-	syncMs := ms(time.Since(tSync))
+	syncMs := 0.0 // DIAG-b: no sync, volatile overlay
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err
