@@ -54,7 +54,7 @@ type Server struct {
 	names sync.Map // name -> *sync.Mutex
 	// cleanups tracks background removal of retired instances
 	cleanups sync.WaitGroup
-	views    storeViews
+	groups   storeGroups
 	ing      ingresses
 
 	runcVerOnce sync.Once
@@ -71,7 +71,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
 	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
-	for _, d := range []string{cfg.Root, s.layout.Tmp(), s.layout.InstancesDir(), s.layout.StoreRoot(), cfg.Runc.Root,
+	for _, d := range []string{cfg.Root, s.layout.Tmp(), s.layout.InstancesDir(), s.layout.StoreLayers(), cfg.Runc.Root,
 		filepath.Join(cfg.Root, "bases"), filepath.Join(cfg.Root, "components"), filepath.Join(cfg.Root, "bundles")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
@@ -251,7 +251,7 @@ func (s *Server) itemPath(it proto.WarmItem) (string, error) {
 		if it.Name == "" || strings.ContainsAny(it.Name, "/\x00") || strings.HasPrefix(it.Name, ".") {
 			return "", fmt.Errorf("invalid store path name %q", it.Name)
 		}
-		return s.layout.StorePath(it.Name), nil
+		return s.layout.StoreLayer(it.Name), nil
 	}
 	return "", fmt.Errorf("unknown artifact kind %q", it.Kind)
 }
@@ -332,7 +332,27 @@ func (s *Server) warmPutInto(it proto.WarmItem, body io.Reader, size int64, res 
 	}
 	src := filepath.Join(stage, "x")
 	if it.Kind == proto.KindStore {
-		src = filepath.Join(stage, "nix", "store", it.Name)
+		// the whole staging directory becomes the store path's overlay
+		// layer: its only content is nix/store/<name>
+		src = stage
+		root := filepath.Join(stage, "nix", "store", it.Name)
+		st, err := os.Lstat(root)
+		if err != nil {
+			return fmt.Errorf("artifact %s does not contain the expected tree", it.Key)
+		}
+		if st.IsDir() {
+			// opaque: lookups inside this store path never search the
+			// other layers of a container's overlay
+			if err := unix.Setxattr(root, "trusted.overlay.opaque", []byte("y"), 0); err != nil {
+				return fmt.Errorf("mark %s opaque: %w", it.Name, err)
+			}
+		}
+		entries, _ := os.ReadDir(stage)
+		for _, e := range entries {
+			if e.Name() != "nix" {
+				return fmt.Errorf("store artifact %s contains unexpected %s", it.Name, e.Name())
+			}
+		}
 	}
 	if _, err := os.Lstat(src); err != nil {
 		return fmt.Errorf("artifact %s does not contain the expected tree", it.Key)
@@ -632,9 +652,6 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	if err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
-	if err := s.ensureStoreView(res.Bundle); err != nil {
-		return nil, false, time.Time{}, time.Time{}, err
-	}
 	tCompose := time.Now()
 	ports, err := allocatePorts(a.Lock.Ports)
 	if err != nil {
@@ -670,9 +687,6 @@ func (s *Server) tryRestore(ctx context.Context, a proto.RunArgs) (*instance, ti
 	t := time.Now()
 	res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
 	if err != nil {
-		return nil, 0, err
-	}
-	if err := s.ensureStoreView(res.Bundle); err != nil {
 		return nil, 0, err
 	}
 	in, err := s.restoreInstance(ctx, a.Name, a, res.Bundle)
@@ -869,9 +883,11 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 	} else if err := os.MkdirAll(filepath.Join(in.dir, "upper"), 0o755); err != nil {
 		return nil, err
 	}
-	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		strings.Join(b.Layers, ":"), filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work"))
-	if err := unix.Mount("overlay", filepath.Join(in.dir, "rootfs"), "overlay", 0, opts); err != nil {
+	if err := s.ensureStoreView(b); err != nil {
+		os.RemoveAll(in.dir)
+		return nil, err
+	}
+	if err := mountOverlay(filepath.Join(in.dir, "rootfs"), b.Layers, filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work")); err != nil {
 		os.RemoveAll(in.dir)
 		return nil, fmt.Errorf("mount overlay: %w", err)
 	}
@@ -1080,7 +1096,7 @@ func (s *Server) StopAll(ctx context.Context) {
 		s.destroy(ctx, in, true)
 	}
 	s.cleanups.Wait()
-	s.unmountAllStoreViews()
+	s.unmountStoreGroups()
 }
 
 // SetShutdown installs the shutdown hook.

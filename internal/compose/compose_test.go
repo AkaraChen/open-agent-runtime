@@ -2,7 +2,6 @@ package compose
 
 import (
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -66,21 +65,19 @@ func TestComposeDeterministicAndCached(t *testing.T) {
 	if last := r1.Bundle.Layers[len(r1.Bundle.Layers)-1]; last != l.BaseDir(p1.Base.Key) {
 		t.Fatalf("base must be the lowest layer, got %s", last)
 	}
-	var view bool
+	view := false
 	for _, m := range r1.Bundle.Spec.Mounts {
-		if strings.HasPrefix(m.Destination, "/nix/store/") || m.Source == l.StoreRoot() {
-			t.Fatalf("unexpected store mount %+v", m)
-		}
 		if m.Destination == "/nix/store" {
-			view = m.Source == l.StoreView(p1.BundleDigest) && strings.Contains(strings.Join(m.Options, ","), "ro")
+			view = m.Source == l.StoreView(ClosureKey(p1)) && m.Source == r1.Bundle.StoreView && strings.Contains(strings.Join(m.Options, ","), "ro")
+		} else if strings.HasPrefix(m.Destination, "/nix/store/") {
+			t.Fatalf("unexpected per-path store mount %+v", m)
 		}
 	}
-	if !view || r1.Bundle.StoreView != l.StoreView(p1.BundleDigest) || len(r1.Bundle.StorePaths) != 1 || r1.Bundle.StorePaths[0] != "aaa-git" {
-		t.Fatalf("store view: mount=%v bundle=%+v", view, r1.Bundle)
+	if !view {
+		t.Fatal("missing read-only /nix/store view mount")
 	}
-	entries, err := os.ReadDir(l.StoreView(p1.BundleDigest))
-	if err != nil || len(entries) != 1 || entries[0].Name() != "aaa-git" {
-		t.Fatalf("store skeleton: %v %v", entries, err)
+	if len(r1.Bundle.StoreLayers) != 1 || r1.Bundle.StoreLayers[0] != l.StoreLayer("aaa-git") {
+		t.Fatalf("store layers %v", r1.Bundle.StoreLayers)
 	}
 }
 
@@ -95,7 +92,7 @@ func TestComposeRejects(t *testing.T) {
 	if _, err := Compose(l, &tampered, "amd64"); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("expected digest mismatch, got %v", err)
 	}
-	os.RemoveAll(filepath.Join(l.StoreRoot(), "aaa-git"))
+	os.RemoveAll(l.StoreLayer("aaa-git"))
 	if _, err := Compose(l, pl, "amd64"); err == nil || !strings.Contains(err.Error(), "not warm") {
 		t.Fatalf("expected not-warm error, got %v", err)
 	}

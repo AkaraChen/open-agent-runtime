@@ -5,6 +5,8 @@
 package compose
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,11 +35,33 @@ func (l Layout) BaseDir(key string) string {
 	return filepath.Join(l.Root, "bases", hexOf(key), "rootfs")
 }
 
-// StoreRoot is the shared immutable /nix/store.
-func (l Layout) StoreRoot() string { return filepath.Join(l.Root, "store", "nix", "store") }
+// StoreView is the read-only /nix/store view of a closure (a hard-link tree
+// of its store paths), bind-mounted into containers. Views are keyed by
+// closure, so bundles that differ only outside /nix/store share one.
+func (l Layout) StoreView(closure string) string { return filepath.Join(l.Root, "views", closure) }
+
+// ClosureKey identifies a closure by its store path names.
+func ClosureKey(pl *manifest.PlatformLock) string {
+	names := make([]string, 0, len(pl.StorePaths))
+	for _, sp := range pl.StorePaths {
+		names = append(names, sp.Name())
+	}
+	sort.Strings(names)
+	h := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return hex.EncodeToString(h[:16])
+}
+
+// StoreLayers holds one directory per store path.
+func (l Layout) StoreLayers() string { return filepath.Join(l.Root, "store", "paths") }
+
+// StoreLayer is the directory of one store path, whose only content is
+// nix/store/<name>.
+func (l Layout) StoreLayer(name string) string { return filepath.Join(l.StoreLayers(), name) }
 
 // StorePath is a single extracted store path.
-func (l Layout) StorePath(name string) string { return filepath.Join(l.StoreRoot(), name) }
+func (l Layout) StorePath(name string) string {
+	return filepath.Join(l.StoreLayer(name), "nix", "store", name)
+}
 
 // ComponentDir is an extracted component tree.
 func (l Layout) ComponentDir(key string) string {
@@ -57,9 +81,6 @@ func (l Layout) SnapshotDir(digest string) string {
 	return filepath.Join(l.BundleDir(digest), "snapshot")
 }
 
-// StoreView is the per-bundle /nix/store skeleton (empty mountpoints).
-func (l Layout) StoreView(digest string) string { return filepath.Join(l.BundleDir(digest), "store") }
-
 // InstancesDir holds per-container instance directories.
 func (l Layout) InstancesDir() string { return filepath.Join(l.Root, "instances") }
 
@@ -71,18 +92,21 @@ func (l Layout) Tmp() string { return filepath.Join(l.Root, "tmp") }
 // 5: private mount propagation (checkpoint/restore).
 // 6: CRIU configuration annotation.
 // 7: rootfs propagation moved to instantiation (depends on pivot_root).
-const templateFormat = 7
+// 8: store paths are overlay layers.
+// 9: /nix/store is a read-only overlay view of the closure, bound once.
+const templateFormat = 10
 
 // Bundle is a cached, composed bundle template.
 type Bundle struct {
 	// Format invalidates cached templates when the generator changes.
 	Format int    `json:"format"`
 	Digest string `json:"digest"`
-	// StoreView is the /nix/store view directory and StorePaths the closure
-	// that must be mounted into it (sorted store path names).
-	StoreView  string   `json:"storeView,omitempty"`
-	StorePaths []string `json:"storePaths,omitempty"`
-	// Layers are overlay lower directories, highest priority first.
+	// StoreLayers are the closure's store path directories (sorted by
+	// name), linked by the agent into the read-only StoreView.
+	StoreLayers []string `json:"storeLayers,omitempty"`
+	StoreView   string   `json:"storeView,omitempty"`
+	// Layers are the other overlay lower directories, highest priority
+	// first: component trees, then the base rootfs (last).
 	Layers []string    `json:"layers"`
 	Spec   *specs.Spec `json:"spec"`
 }
@@ -110,7 +134,7 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	if b, err := os.ReadFile(cachePath); err == nil {
 		var cached Bundle
 		if json.Unmarshal(b, &cached) == nil && cached.Digest == want && cached.Format == templateFormat {
-			if err := checkWarm(l, pl); err == nil && (len(pl.StorePaths) == 0 || isDir(l.StoreView(want))) {
+			if err := checkWarm(l, pl); err == nil {
 				return &Result{Bundle: &cached, Cached: true}, nil
 			}
 		}
@@ -121,16 +145,9 @@ func Compose(l Layout, pl *manifest.PlatformLock, arch string) (*Result, error) 
 	if err := checkComponentConflicts(pl); err != nil {
 		return nil, err
 	}
-	if err := writeStoreView(l, pl); err != nil {
-		return nil, err
-	}
-	b := &Bundle{Format: templateFormat, Digest: want, Layers: Layers(l, pl), Spec: Spec(l, pl)}
+	b := &Bundle{Format: templateFormat, Digest: want, Layers: Layers(l, pl), StoreLayers: StoreLayers(l, pl), Spec: Spec(l, pl)}
 	if len(pl.StorePaths) > 0 {
-		b.StoreView = l.StoreView(want)
-		for _, sp := range pl.StorePaths {
-			b.StorePaths = append(b.StorePaths, sp.Name())
-		}
-		sort.Strings(b.StorePaths)
+		b.StoreView = l.StoreView(ClosureKey(pl))
 	}
 	data, err := json.Marshal(b)
 	if err != nil {
@@ -191,50 +208,6 @@ func checkComponentConflicts(pl *manifest.PlatformLock) error {
 	return nil
 }
 
-// writeStoreView creates the skeleton of mountpoints for the closure. It
-// is built in a temporary directory and renamed into place, so concurrent
-// composes never see a partial view.
-func writeStoreView(l Layout, pl *manifest.PlatformLock) error {
-	if len(pl.StorePaths) == 0 {
-		return nil
-	}
-	dst := l.StoreView(pl.BundleDigest)
-	if isDir(dst) {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dst), "store.tmp-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	for _, sp := range pl.StorePaths {
-		mp := filepath.Join(tmp, sp.Name())
-		// a store path may be a single file; its mountpoint must be a file
-		if st, err := os.Stat(l.StorePath(sp.Name())); err == nil && !st.IsDir() {
-			f, err := os.OpenFile(mp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-			if err != nil {
-				return err
-			}
-			f.Close()
-			continue
-		}
-		if err := os.Mkdir(mp, 0o755); err != nil {
-			return err
-		}
-	}
-	// read-only is enforced by the bind mount, not by permissions
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil && !isDir(dst) {
-		return err
-	}
-	return nil
-}
-
 func isDir(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
@@ -243,6 +216,20 @@ func isDir(p string) bool {
 func exists(p string) bool {
 	_, err := os.Lstat(p)
 	return err == nil
+}
+
+// StoreLayers returns the closure's store path layers, sorted by name.
+func StoreLayers(l Layout, pl *manifest.PlatformLock) []string {
+	names := make([]string, 0, len(pl.StorePaths))
+	for _, sp := range pl.StorePaths {
+		names = append(names, sp.Name())
+	}
+	sort.Strings(names)
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = l.StoreLayer(n)
+	}
+	return out
 }
 
 // Layers returns overlay lowerdirs: components (sorted by key, so the order
@@ -314,14 +301,11 @@ func Spec(l Layout, pl *manifest.PlatformLock) *specs.Spec {
 		},
 	}
 	if len(pl.StorePaths) > 0 {
-		// Only this bundle's closure is visible. The guest agent mounts each
-		// closure path read-only onto the bundle's skeleton once (see
-		// Bundle.StorePaths); every container then receives that view with
-		// a single recursive bind, so start cost does not grow with the
-		// closure size.
+		// The agent links the closure into one read-only view per closure;
+		// each container gets it with a single bind.
 		s.Mounts = append(s.Mounts, specs.Mount{
-			Destination: "/nix/store", Type: "bind", Source: l.StoreView(pl.BundleDigest),
-			Options: []string{"rbind", "ro", "nosuid", "nodev"},
+			Destination: "/nix/store", Type: "bind", Source: l.StoreView(ClosureKey(pl)),
+			Options: []string{"bind", "ro", "nosuid", "nodev"},
 		})
 	}
 	return s

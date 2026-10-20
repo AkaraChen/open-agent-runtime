@@ -166,10 +166,10 @@ The CLI and agent check a protocol version, so a CLI refuses to drive an outdate
 ```text
 /var/lib/oar/
 ├── bases/<sha>/rootfs/            extracted base root filesystems
-├── store/nix/store/<hash-name>/   shared immutable Nix store (all warmed store paths)
+├── store/paths/<hash-name>/       shared immutable Nix store, one directory per warmed store path
 ├── components/<sha>/tree/         extracted component trees
 ├── bundles/<digest>/bundle.json   composed bundle templates (layers + OCI spec)
-├── bundles/<digest>/store/        /nix/store view: closure paths bound read-only (built once per bundle)
+├── views/<closure>/               /nix/store views: a closure as a hard-link tree (built once per closure)
 └── instances/<id>/                per-container: rootfs (overlay mount), upper/, work/,
                                    config.json, console.log
 ```
@@ -197,37 +197,37 @@ The container's root filesystem is a mounted view, not a copied image:
 flowchart TB
     subgraph View["container view"]
         ROOT["/  (OverlayFS)"]
-        NS["/nix/store  (read-only skeleton)"]
-        P1["/nix/store/…-nodejs-22"]
-        P2["/nix/store/…-glibc-2.42"]
+        NS["/nix/store  (read-only bind)"]
     end
     UP["instance upper/ (writable)"] --> ROOT
     C1["component tree: my-agent"] --> ROOT
     C2["component tree: app-config"] --> ROOT
     BASE["base rootfs: debian-trixie-slim"] --> ROOT
-    SK["bundle view<br/>(built once, single rbind)"] --> NS
-    subgraph Shared["shared guest /nix/store"]
+    SK["bundle view: …-nodejs-22, …-glibc-2.42<br/>(hard links, built once per closure)"] -- "ro bind" --> NS
+    subgraph Shared["shared guest store"]
         S1["…-nodejs-22"]
         S2["…-glibc-2.42"]
         S3["…-git-2.54  (other bundle)"]
     end
-    S1 -- "ro bind" --> P1
-    S2 -- "ro bind" --> P2
+    S1 -- "hard links" --> SK
+    S2 -- "hard links" --> SK
 ```
 
 Component layers are ordered by content hash, not by configuration order. This is safe because
 conflicts were already rejected by the builder.
 
-The guest keeps one shared, deduplicated `/nix/store`, but each container sees **only its own
-closure**. For each bundle, the agent builds a view once: a skeleton of empty mountpoints, one per
-closure path, with each store path bind-mounted read-only onto its mountpoint. Every container of
-that bundle then receives the whole view through a single recursive bind. Store paths warmed for
-other bundles stay invisible, nothing under `/nix/store` is writable, and start cost does not grow
-with the closure size.
+The guest keeps one shared, deduplicated store, but each container sees **only its own closure**.
+For each closure, the agent builds a view once, when a bundle using it is warmed: a directory tree
+that mirrors the closure, with every file hard-linked to the shared store's inode. Every container
+whose bundle has that closure then receives the view through a single read-only bind mount at
+`/nix/store`; bundles that differ only in components, environment or process share the view. Store
+paths warmed for other bundles stay invisible, nothing under `/nix/store` is writable, and start
+cost does not grow with the closure size.
 
-Building a view costs about 13 ms for a 120-path closure, once per bundle. Views of bundles
-without running containers are unmounted when more than eight are mounted, and all views are
-unmounted when the guest stops.
+Because the view is made of hard links rather than mounts, reads go straight to the guest
+filesystem, all bundles share one page cache for the same file, and no mounts stay resident in the
+agent's namespace (each container's mount namespace copies those, so resident mounts made every
+`runc create` slower). A view costs one directory and one link per file, built in parallel.
 
 ### Starting a container
 

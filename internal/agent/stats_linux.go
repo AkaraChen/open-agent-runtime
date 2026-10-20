@@ -53,9 +53,9 @@ func (s *Server) stats() proto.StatsResult {
 			if err != nil {
 				return nil
 			}
-			// do not descend into mounted views or instance rootfs mounts
+			// skip instance rootfs mounts and store views (hard links to the store)
 			if d.IsDir() && p != root && (strings.HasSuffix(p, "/rootfs") && area == "instances" ||
-				area == "bundles" && filepath.Base(filepath.Dir(p)) == "store") {
+				area == "bundles" && filepath.Base(p) == "store") {
 				return fs.SkipDir
 			}
 			if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
@@ -69,9 +69,9 @@ func (s *Server) stats() proto.StatsResult {
 	if b, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
 		res.Mounts = strings.Count(string(b), "\n")
 	}
-	s.views.mu.Lock()
-	res.StoreViews = len(s.views.views)
-	s.views.mu.Unlock()
+	s.groups.mu.Lock()
+	res.StoreViews = len(s.groups.mounted)
+	s.groups.mu.Unlock()
 	if list, err := s.loadInstances(); err == nil {
 		res.Instances = len(list)
 	}
