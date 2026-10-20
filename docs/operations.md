@@ -88,6 +88,29 @@ The single failure under `overlap` is a connection still queued on the old liste
 a known `SO_REUSEPORT` limitation. Avoiding it requires the application to drain its listener
 gracefully.
 
+## Inspecting package evaluation
+
+`oar nix-eval` runs the same evaluation `oar build` runs for `nix:` components and prints what the
+build records: output store paths and the main program.
+
+```console
+$ oar nix-eval nodejs_22 python313
+ATTR       MAIN PROGRAM  OUTPUTS
+nodejs_22  node          /nix/store/r8avny0rl4kpc9zig9ar8i9ny7mw0lxz-nodejs-22.23.3
+python313  python3.13    /nix/store/jy00n3jp5xj8s40n1fbldmkcr5n7avxc-python3-3.13.15
+$ oar nix-eval --system aarch64-linux --json git
+$ oar nix-eval --expr 'pkgs.nodejs_22.version'
+$ oar nix-eval --nixpkgs ~/src/nixpkgs hello          # a local checkout
+$ oar nix-eval --backend local nodejs_22              # the same through nix-instantiate
+```
+
+The nixpkgs tree of a revision is downloaded once into the user cache directory
+(`~/.cache/oar/nixpkgs/<rev>/` on Linux, `~/Library/Caches/oar/` on macOS; `OAR_CACHE_DIR`
+overrides it), next to the evaluator's compiled-file cache. `--backend` picks the embedded evaluator,
+`nix-instantiate` on `PATH` or the `nixos/nix` Docker image; `OAR_NIX` sets the default for builds.
+Comparing `--backend embedded` with `--backend local` is the quickest way to check the embedded
+evaluator against Nix when a package looks wrong.
+
 ## Day-to-day commands
 
 | Command | Purpose |

@@ -36,9 +36,11 @@ flowchart LR
 
 ## 1. Artifact Builder
 
-The builder runs on the developer machine or in CI. It needs network access and, for Nix
-evaluation only, either `nix-instantiate` or Docker. Its output is a directory of immutable artifacts
-plus a lock file. Both can be copied anywhere.
+The builder runs on the developer machine or in CI. It needs network access and nothing else:
+Nix packages are evaluated by [iets](https://github.com/numtide/iets), a Nix evaluator linked into
+the `oar` binary and run as a child `oar nix-eval` process (`nix-instantiate` or Docker remain as
+optional backends; see [the design note](design/embedded-nix-evaluator.md)). Its output is a
+directory of immutable artifacts plus a lock file. Both can be copied anywhere.
 
 ```mermaid
 flowchart TB

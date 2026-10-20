@@ -50,5 +50,6 @@ $ hack/build.sh
 $ bin/oar vm start --cpus 4 --memory 4096
 ```
 
-Artifact building on macOS needs `nix-instantiate` for package evaluation. Store paths themselves are
-fetched and converted without touching the case-insensitive filesystem.
+Artifact building on macOS needs no Nix installation: packages are evaluated by the evaluator built
+into `oar` (`hack/build.sh` links it; `oar --version` shows it). Store paths themselves are fetched
+and converted without touching the case-insensitive filesystem.

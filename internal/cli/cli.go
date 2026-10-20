@@ -16,6 +16,7 @@ import (
 
 	"github.com/AkaraChen/open-agent-runtime/internal/builder"
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
+	"github.com/AkaraChen/open-agent-runtime/internal/nixeval"
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
 )
 
@@ -51,7 +52,9 @@ func Main(args []string) int {
 		vmCmd(g),
 		warmCmd(g), composeCmd(g),
 		runCmd(g), reloadCmd(g), stopCmd(g), rmCmd(g), psCmd(g), logsCmd(g), execCmd(g),
+		nixEvalCmd(g),
 	)
+	root.SetVersionTemplate(fmt.Sprintf("oar version {{.Version}}\nnix evaluator: %s\n", nixeval.EmbeddedVersion()))
 	if c := agentCmd(); c != nil {
 		root.AddCommand(c)
 	}

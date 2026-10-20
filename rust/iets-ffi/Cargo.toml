@@ -1,0 +1,22 @@
+# The static library oar links for `oar nix-eval --backend embedded`
+# (docs/design/embedded-nix-evaluator.md). It wraps the iets evaluator in
+# a C ABI, and nothing else.
+[package]
+name = "iets-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+iets = { git = "https://github.com/numtide/iets", rev = "bdd26f2c3a3b845f97fcc0c78aaa11afdf4bd476" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

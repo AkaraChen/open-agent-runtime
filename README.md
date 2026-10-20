@@ -57,6 +57,9 @@ $ oar reload    # switch to a new environment with no downtime
   the order you list them in.
 - **Composable, not monolithic.** Mix a distro base, any of the 100,000+ packages in nixpkgs, and your
   own binaries, directories or inline files. Conflicts are reported, never silently resolved.
+- **No Nix installation.** A Nix evaluator ([iets](https://github.com/numtide/iets)) is built into
+  the `oar` binary; packages are resolved and fetched from the binary cache without `nix` or Docker
+  on the machine.
 - **Ship artifacts, not images.** Compiled environments are plain content-addressed files. Distribute
   them to fleets, deduplicate across versions, and roll out new environments without build tools on
   the target.
@@ -90,6 +93,7 @@ Read the [architecture guide](docs/architecture.md) for the full design.
 |---|---|
 | **Declarative environments** | Base image, Nix packages, binaries, directories and inline files in one YAML file |
 | **Pinned and verified** | Digest-pinned bases, commit-pinned nixpkgs (per package if needed), signature-checked downloads |
+| **Self-contained builds** | Built-in Nix evaluator; `oar nix-eval` shows what a build resolves |
 | **Multi-architecture** | Artifacts for `linux/amd64` and `linux/arm64` from any build host |
 | **Resident guest** | A minimal Linux VM boots once and serves every container: Virtualization.framework on macOS, KVM on Linux |
 | **Zero-downtime reloads** | `overlap` and `replace` strategies, readiness checks, automatic rollback |

@@ -1,0 +1,8 @@
+oar links iets (https://github.com/numtide/iets), a Nix evaluator by
+zimbatm and contributors, as a static library built from rust/iets-ffi.
+
+iets is licensed under the GNU Lesser General Public License, version 2.1
+or later (COPYING in this directory). The pinned revision is the one named
+in rust/iets-ffi/Cargo.toml. oar itself stays under the MIT license (see
+LICENSE at the repository root); its source lets you rebuild oar against a
+modified iets, as section 6 of the LGPL asks.

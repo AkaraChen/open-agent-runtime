@@ -6,12 +6,10 @@ import (
 	"compress/bzip2"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -24,6 +22,7 @@ import (
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 	"github.com/AkaraChen/open-agent-runtime/internal/nar"
+	"github.com/AkaraChen/open-agent-runtime/internal/nixeval"
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
 )
 
@@ -34,10 +33,7 @@ const (
 )
 
 // evalResult is the outcome of evaluating one attribute for one system.
-type evalResult struct {
-	Outputs     []string `json:"outputs"`
-	MainProgram string   `json:"mainProgram,omitempty"`
-}
+type evalResult = nixeval.Result
 
 type evalCache struct {
 	Entries map[string]evalResult `json:"entries"`
@@ -46,8 +42,9 @@ type evalCache struct {
 func evalKey(rev, system, attr string) string { return rev + "/" + system + "/" + attr }
 
 // evalPackages resolves attribute names to output store paths. Results are
-// cached in artifacts/manifests/nix-eval.json; nix is only invoked for
-// attributes that were never evaluated at this revision.
+// cached in artifacts/manifests/nix-eval.json; the evaluator runs only for
+// attributes that were never evaluated at this revision, as a child
+// `oar nix-eval` process (docs/design/embedded-nix-evaluator.md).
 func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map[string]evalResult, error) {
 	cachePath := filepath.Join(b.opts.Artifacts, "manifests", "nix-eval.json")
 	var cache evalCache
@@ -69,77 +66,21 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 		return out, nil
 	}
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
-	quoted, _ := json.Marshal(missing)
-	expr := fmt.Sprintf(`
-let
-  pkgs = import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/%s.tar.gz") {
-    system = %q; config = { allowUnfree = false; }; overlays = [];
-  };
-  lib = pkgs.lib;
-  docs = [ "man" "doc" "devdoc" "info" ];
-  get = n: let
-      d = lib.getAttrFromPath (lib.splitString "." n) pkgs;
-      outs = lib.subtractLists docs (d.meta.outputsToInstall or [ "out" ]);
-    in {
-      outputs = map (o: d.${o}.outPath) (if outs == [] then [ "out" ] else outs);
-      mainProgram = d.meta.mainProgram or "";
-    };
-in builtins.listToAttrs (map (n: { name = n; value = get n; }) (builtins.fromJSON %q))
-`, rev, system, string(quoted))
-	res, err := b.runNixEval(expr)
+	child := nixeval.Child{Log: b.opts.Log}
+	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing})
 	if err != nil {
 		return nil, err
 	}
-	var parsed map[string]evalResult
-	if err := json.Unmarshal(res, &parsed); err != nil {
-		return nil, fmt.Errorf("parse nix eval output: %w\n%s", err, res)
+	parsed, err := nixeval.ParseAttrs(res, missing)
+	if err != nil {
+		return nil, err
 	}
 	for _, a := range missing {
-		r, ok := parsed[a]
-		if !ok || len(r.Outputs) == 0 {
-			return nil, fmt.Errorf("nix eval: no outputs for %s", a)
-		}
-		out[a] = r
-		cache.Entries[evalKey(rev, system, a)] = r
+		out[a] = parsed[a]
+		cache.Entries[evalKey(rev, system, a)] = parsed[a]
 	}
 	if err := manifest.WriteJSON(cachePath, &cache); err != nil {
 		return nil, err
-	}
-	return out, nil
-}
-
-// runNixEval evaluates expr with a local nix-instantiate, or inside the
-// nixos/nix container image when nix is not installed on the host.
-func (b *Builder) runNixEval(expr string) ([]byte, error) {
-	args := []string{"--eval", "--json", "--strict", "--read-write-mode", "--expr", expr}
-	mode := os.Getenv("OAR_NIX")
-	if mode == "" {
-		if _, err := exec.LookPath("nix-instantiate"); err == nil {
-			mode = "local"
-		} else if _, err := exec.LookPath("docker"); err == nil {
-			mode = "docker"
-		} else {
-			return nil, fmt.Errorf("nix evaluation requires nix-instantiate or docker on the build host")
-		}
-	}
-	var cmd *exec.Cmd
-	switch mode {
-	case "local":
-		cmd = exec.CommandContext(b.ctx, "nix-instantiate", args...)
-	case "docker":
-		img := os.Getenv("OAR_NIX_IMAGE")
-		if img == "" {
-			img = "nixos/nix:latest"
-		}
-		cmd = exec.CommandContext(b.ctx, "docker", append([]string{"run", "--rm", "-v", "oar-nix-cache:/root/.cache", img, "nix-instantiate"}, args...)...)
-	default:
-		return nil, fmt.Errorf("OAR_NIX=%s: want local or docker", mode)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("nix eval (%s) failed: %w\n%s", mode, err, stderr.String())
 	}
 	return out, nil
 }
