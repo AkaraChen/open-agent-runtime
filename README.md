@@ -8,6 +8,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/AkaraChen/open-agent-runtime.svg)](https://pkg.go.dev/github.com/AkaraChen/open-agent-runtime)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 </div>
 
@@ -142,3 +143,7 @@ See [platforms](docs/platforms.md) for host requirements and supported backends.
 Contributions are welcome. Start with the [development guide](docs/development.md). Before you
 submit a change, run `go test ./...` and the acceptance suite (`hack/e2e.sh`) on at least one
 backend.
+
+## License
+
+open-agent-runtime is licensed under the [MIT License](LICENSE).
