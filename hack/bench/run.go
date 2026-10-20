@@ -736,8 +736,18 @@ func (b *bench) run(name, bundle string) (*runOut, time.Duration, error) {
 	return &r, d, err
 }
 
+// rm stops and deletes a container, forcing deletion if a graceful stop
+// did not finish (slow backends), so later phases start clean.
 func (b *bench) rm(name string) {
 	b.oarCmd("stop", "--name", name, "--rm", "--timeout", "5s")
+	var list proto.ListResult
+	if _, err := b.oarJSON(&list, "ps"); err == nil {
+		for _, c := range list.Containers {
+			if c.Name == name {
+				b.oarCmd("rm", "--name", name, "--force")
+			}
+		}
+	}
 }
 
 func (b *bench) phaseStart() error {
@@ -924,11 +934,16 @@ func (b *bench) phaseRuntime() error {
 		}
 		b.exec("work", "sh", "-c", readCmd)
 		s1, _ := b.stats()
+		first := float64(s1.Cached - s0.Cached)
 		if _, _, err := b.run("work2", b.digests["idle"]); err == nil {
+			// the container's own startup reads files too; measure only
+			// the read itself
+			time.Sleep(2 * time.Second)
+			s1, _ = b.stats()
 			b.exec("work2", "sh", "-c", readCmd)
 			s2, _ := b.stats()
 			b.rm("work2")
-			d1, d2 := float64(s1.Cached-s0.Cached), float64(s2.Cached-s1.Cached)
+			d1, d2 := first, float64(s2.Cached-s1.Cached)
 			if d1 > 1<<20 {
 				b.add(g, "pagecache.shared", "page cache 共享：第二个容器读同一 store path 新增缓存 / 第一个", "%", true, 100*math.Max(0, d2)/d1).Note =
 					fmt.Sprintf("第一个容器 +%.0f MiB，第二个 +%.0f MiB（越低越好）", d1/(1<<20), d2/(1<<20))

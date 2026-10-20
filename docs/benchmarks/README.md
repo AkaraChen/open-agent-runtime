@@ -7,6 +7,7 @@
 | 0 | [基线](00-baseline/README.md) | 测量工具与基线 |
 | 1 | [并发、预组合与预创建](01-concurrency-prepare/README.md) | 按容器名加锁、warm 时预组合、`oar prepare`、启动探测 |
 | 2 | [控制通道](02-control-channel/README.md) | 缓存 runc 版本、guest 连接池、VZ 磁盘模式、环境基准 |
+| 3 | [入口代理与热备](03-ingress-standby/README.md) | 私有端口 + 入口代理、`prepare --start` 热备、宿主机端口转发、产物按内容寻址 |
 
 复现方法：
 
