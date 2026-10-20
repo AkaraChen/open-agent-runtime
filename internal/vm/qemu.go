@@ -98,13 +98,21 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	accel := accelerator(arch)
 	var machine, console string
+	// device suffix: virtio over PCI, or virtio-mmio on microvm
+	bus := "-pci"
 	cpu := "max"
 	if accel != "tcg" {
 		cpu = "host"
 	}
 	switch arch {
 	case "amd64":
+		// microvm (no PCI bus, minimal ACPI, qboot firmware) boots in about
+		// half the time of q35, whose PCI and ACPI enumeration dominated the
+		// kernel's boot; OAR_QEMU_MACHINE=q35 selects the PC machine
 		machine, console = "q35,accel="+accel, "ttyS0"
+		if os.Getenv("OAR_QEMU_MACHINE") != "q35" {
+			machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
+		}
 	case "arm64":
 		machine, console = "virt,accel="+accel, "ttyAMA0"
 		if accel != "hvf" {
@@ -123,7 +131,7 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	var transport []string
 	if useVsock {
 		m.cid = uint32(3 + rand.IntN(1<<30))
-		transport = []string{"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", m.cid)}
+		transport = []string{"-device", fmt.Sprintf("vhost-vsock%s,guest-cid=%d", bus, m.cid)}
 	} else {
 		port, err := freePort()
 		if err != nil {
@@ -133,6 +141,10 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		netdev += fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:1024", port)
 		cmdline += " oar.tcp=1024"
 	}
+	netDevice := "virtio-net" + bus + ",netdev=net0"
+	if bus == "-pci" {
+		netDevice += ",romfile=" // no PXE option ROM
+	}
 	args := []string{
 		"-machine", machine, "-cpu", cpu,
 		"-smp", strconv.Itoa(cfg.CPUs), "-m", strconv.Itoa(cfg.MemoryMiB),
@@ -141,9 +153,9 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		"-append", cmdline,
 		"-serial", "file:" + cfg.ConsoleLog,
 		"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=writeback",
-		"-device", "virtio-blk-pci,drive=data",
-		"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0,romfile=",
-		"-device", "virtio-rng-pci",
+		"-device", "virtio-blk" + bus + ",drive=data",
+		"-netdev", netdev, "-device", netDevice,
+		"-device", "virtio-rng" + bus,
 		"-monitor", "none",
 	}
 	args = append(args, transport...)

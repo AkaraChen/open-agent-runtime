@@ -5,7 +5,7 @@
 | Backend | Host | How it runs the guest |
 |---|---|---|
 | `vz` | macOS | Apple Virtualization.framework, virtio-vsock, NAT networking, sparse data disk |
-| `kvm` | Linux | QEMU with KVM (falls back to TCG emulation), vhost-vsock |
+| `kvm` | Linux | QEMU with KVM (falls back to TCG emulation), `microvm` machine (virtio-mmio, no PCI), vhost-vsock |
 | `qemu` | Linux, macOS | QEMU with KVM, HVF or TCG; vsock on Linux, loopback TCP forward elsewhere |
 | `native` | Linux | no VM: the agent drives `runc` on the host kernel (requires root, via sudo) |
 | `wsl2` | Windows | imports the guest root filesystem as a WSL2 distribution (experimental) |
