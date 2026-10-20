@@ -774,6 +774,12 @@ func (b *bench) phaseStart() error {
 	tSync := time.Now()
 	b.statsArgs(proto.StatsArgs{Sync: true})
 	syncMs := ms(time.Since(tSync))
+	// DIAG-a: a throwaway first container (other bundle) before s0
+	if _, _, err := b.run("warmup", b.digests["b"]); err != nil {
+		return err
+	}
+	b.rm("warmup")
+	b.statsArgs(proto.StatsArgs{Sync: true})
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err
