@@ -2,7 +2,7 @@
 # Runs inside an alpine container: assembles the guest userland for $APKARCH
 # without executing foreign binaries, then packs it as initramfs and tar.
 set -eu
-apk add --no-cache cpio tar >/dev/null
+apk add --no-cache cpio tar lz4 >/dev/null
 R=/tmp/rootfs
 rm -rf "$R" && mkdir -p "$R/etc/apk"
 apk --arch "$APKARCH" --root "$R" --initdb --no-scripts --no-cache \
@@ -32,7 +32,10 @@ mkdir -p "$R/proc" "$R/sys" "$R/dev" "$R/run" "$R/tmp" "$R/var/lib/oar"
 echo oar-guest > "$R/etc/hostname"
 test -x "$R/sbin/mkfs.ext4" || test -e "$R/sbin/mkfs.ext4"
 cd "$R"
-find . | sort | cpio -o -H newc -R 0:0 --quiet | gzip -9n > /out/initramfs.cpio.gz
+# LZ4 (legacy frame format, which the kernel expects): unpacks about five
+# times faster than gzip at boot
+rm -f /out/initramfs.cpio.gz
+find . | sort | cpio -o -H newc -R 0:0 --quiet | lz4 -l -9 -q > /out/initramfs.cpio.lz4
 tar --numeric-owner --owner=0 --group=0 -cf /out/rootfs.tar .
-chown "$OWNER" /out/initramfs.cpio.gz /out/rootfs.tar
-echo ">> initramfs: $(du -h /out/initramfs.cpio.gz | cut -f1)"
+chown "$OWNER" /out/initramfs.cpio.lz4 /out/rootfs.tar
+echo ">> initramfs: $(du -h /out/initramfs.cpio.lz4 | cut -f1)"

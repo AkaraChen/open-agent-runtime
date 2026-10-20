@@ -34,7 +34,7 @@ lifecycle, resident guest) unless noted.
 ```console
 $ guest/build.sh amd64     # or arm64; needs docker and go
 $ ls guest/out/amd64
-initramfs.cpio.gz  kernel  kernel.config  rootfs.tar
+initramfs.cpio.lz4  kernel  kernel.config  rootfs.tar
 ```
 
 `oar vm start` looks for the image in `--guest-dir`, then `$OAR_GUEST_DIR`, then

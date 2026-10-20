@@ -20,9 +20,12 @@ $M defconfig >/dev/null
 "$SRC/scripts/kconfig/merge_config.sh" -m -O "$B" "$B/.config" /guest/kernel.config "/guest/kernel-$ARCH_NAME.config" >/dev/null
 $M olddefconfig >/dev/null
 # verify the fragment took effect
-for opt in CONFIG_VIRTIO_BLK CONFIG_VIRTIO_VSOCKETS CONFIG_OVERLAY_FS CONFIG_EXT4_FS CONFIG_VIRTIO_CONSOLE CONFIG_CGROUP_BPF CONFIG_VIRTIO_NET CONFIG_CHECKPOINT_RESTORE CONFIG_UNIX_DIAG CONFIG_INET_DIAG; do
+for opt in CONFIG_VIRTIO_BLK CONFIG_VIRTIO_VSOCKETS CONFIG_OVERLAY_FS CONFIG_EXT4_FS CONFIG_VIRTIO_CONSOLE CONFIG_CGROUP_BPF CONFIG_VIRTIO_NET CONFIG_CHECKPOINT_RESTORE CONFIG_UNIX_DIAG CONFIG_INET_DIAG CONFIG_RD_LZ4; do
   grep -q "^$opt=y" "$B/.config" || { echo "missing $opt=y" >&2; exit 1; }
 done
+if [ "$KARCH" = x86_64 ]; then
+  grep -q "^CONFIG_KERNEL_LZ4=y" "$B/.config" || { echo "missing CONFIG_KERNEL_LZ4=y" >&2; exit 1; }
+fi
 echo ">> building $KIMAGE ($KARCH, $(nproc) jobs)"
 $M -j"$(nproc)" "$KIMAGE" >/dev/null
 cp "$B/$KPATH" /out/kernel

@@ -3,7 +3,7 @@
 #
 #   guest/build.sh <amd64|arm64> [kernel|initramfs|all]
 #
-# Outputs guest/out/<arch>/{kernel,initramfs.cpio.gz,rootfs.tar}. Requires
+# Outputs guest/out/<arch>/{kernel,initramfs.cpio.lz4,rootfs.tar}. Requires
 # docker and go. Builds are cached in guest/.cache.
 set -euo pipefail
 

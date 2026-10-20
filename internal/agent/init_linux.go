@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,14 @@ func RunInit() {
 		}
 	}
 	enableControllers()
+	kernel := uptime()
+	if t, err := strconv.ParseFloat(os.Getenv("OAR_BOOT_KERNEL"), 64); err == nil {
+		kernel = t
+		if t, err := strconv.ParseFloat(os.Getenv("OAR_BOOT_SWITCHED"), 64); err == nil {
+			markBootAt("switchRoot", t)
+		}
+	}
+	markBootAt("kernel", kernel)
 	markBoot("mounts")
 	unix.Sethostname([]byte("oar-guest"))
 	ifUp("lo")
@@ -188,7 +197,7 @@ func mountData() {
 	if !hasExt4(dev) {
 		logInit("formatting %s", dev)
 		markBoot("formatStart")
-		out, err := exec.Command("mkfs.ext4", "-q", "-F", "-L", "oar-data", "-E", "lazy_itable_init=1,lazy_journal_init=1", dev).CombinedOutput()
+		out, err := mkfsData(dev).CombinedOutput()
 		if err != nil {
 			logInit("mkfs.ext4 failed: %v: %s", err, out)
 		}
@@ -200,7 +209,7 @@ func mountData() {
 		exec.Command("e2fsck", "-p", "-f", dev).Run()
 		if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
 			logInit("still unmountable (%v); reformatting the cache disk", err)
-			exec.Command("mkfs.ext4", "-q", "-F", "-L", "oar-data", "-E", "lazy_itable_init=1,lazy_journal_init=1", dev).Run()
+			mkfsData(dev).Run()
 			if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
 				logInit("mount %s: %v; using tmpfs", dev, err)
 				unix.Mount("tmpfs", GuestRoot, "tmpfs", 0, "mode=0755")
@@ -209,6 +218,15 @@ func mountData() {
 		}
 	}
 	logInit("data disk %s mounted at %s", dev, GuestRoot)
+}
+
+// mkfsData formats the cache disk. Metadata is written lazily, the device
+// is not discarded (a sparse image has nothing to discard, and discarding
+// it through virtio costs more than the rest of mkfs) and no blocks are
+// reserved for online growth.
+func mkfsData(dev string) *exec.Cmd {
+	return exec.Command("mkfs.ext4", "-q", "-F", "-L", "oar-data", "-O", "^resize_inode",
+		"-E", "lazy_itable_init=1,lazy_journal_init=1,nodiscard", dev)
 }
 
 func hasExt4(dev string) bool {

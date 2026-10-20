@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
@@ -22,26 +24,30 @@ const bootTimelinePath = "/run/oar/boot.json"
 var bootMu sync.Mutex
 
 // markBoot records the current guest uptime under name.
-func markBoot(name string) {
+func markBoot(name string) { markBootAt(name, uptime()) }
+
+// markBootAt records a milestone measured earlier (before /run existed).
+func markBootAt(name string, t float64) {
 	bootMu.Lock()
 	defer bootMu.Unlock()
 	m := map[string]float64{}
 	if b, err := os.ReadFile(bootTimelinePath); err == nil {
 		json.Unmarshal(b, &m)
 	}
-	m[name] = uptime()
+	m[name] = t
 	os.MkdirAll(filepath.Dir(bootTimelinePath), 0o755)
 	b, _ := json.Marshal(m)
 	os.WriteFile(bootTimelinePath, b, 0o644)
 }
 
+// uptime is the time since boot in seconds (CLOCK_BOOTTIME, which needs no
+// /proc and so works from the first instruction of init).
 func uptime() float64 {
-	b, err := os.ReadFile("/proc/uptime")
-	if err != nil {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
 		return 0
 	}
-	f, _ := strconv.ParseFloat(strings.Fields(string(b))[0], 64)
-	return f
+	return float64(ts.Sec) + float64(ts.Nsec)/1e9
 }
 
 func (s *Server) stats() proto.StatsResult {
@@ -53,9 +59,8 @@ func (s *Server) stats() proto.StatsResult {
 			if err != nil {
 				return nil
 			}
-			// skip instance rootfs mounts and store views (hard links to the store)
-			if d.IsDir() && p != root && (strings.HasSuffix(p, "/rootfs") && area == "instances" ||
-				area == "bundles" && filepath.Base(p) == "store") {
+			// do not descend into instance rootfs mounts
+			if d.IsDir() && p != root && strings.HasSuffix(p, "/rootfs") && area == "instances" {
 				return fs.SkipDir
 			}
 			if info, err := d.Info(); err == nil && info.Mode().IsRegular() {

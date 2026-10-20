@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 // qemu boots the guest with QEMU. On Linux it uses KVM when /dev/kvm is
@@ -115,72 +114,63 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		return nil, fmt.Errorf("unsupported arch %s", arch)
 	}
 	useVsock := vsockAvailable()
-	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		m := &qemuMachine{done: make(chan struct{})}
-		cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
-		if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
-			cmdline += " " + extra
-		}
-		netdev := "user,id=net0"
-		var transport []string
-		if useVsock {
-			m.cid = uint32(3 + rand.IntN(1<<30))
-			transport = []string{"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", m.cid)}
-		} else {
-			port, err := freePort()
-			if err != nil {
-				return nil, err
-			}
-			m.tcpAddr = fmt.Sprintf("127.0.0.1:%d", port)
-			netdev += fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:1024", port)
-			cmdline += " oar.tcp=1024"
-		}
-		args := []string{
-			"-machine", machine, "-cpu", cpu,
-			"-smp", strconv.Itoa(cfg.CPUs), "-m", strconv.Itoa(cfg.MemoryMiB),
-			"-nodefaults", "-no-user-config", "-nographic", "-no-reboot",
-			"-kernel", cfg.Kernel, "-initrd", cfg.Initrd,
-			"-append", cmdline,
-			"-serial", "file:" + cfg.ConsoleLog,
-			"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=writeback",
-			"-device", "virtio-blk-pci,drive=data",
-			"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0,romfile=",
-			"-device", "virtio-rng-pci",
-			"-monitor", "none",
-		}
-		args = append(args, transport...)
-		cmd := exec.Command(qemuBinary(arch), args...)
-		logPath := filepath.Join(cfg.Dir, "qemu.log")
-		logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	m := &qemuMachine{done: make(chan struct{})}
+	cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
+	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
+		cmdline += " " + extra
+	}
+	netdev := "user,id=net0"
+	var transport []string
+	if useVsock {
+		m.cid = uint32(3 + rand.IntN(1<<30))
+		transport = []string{"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", m.cid)}
+	} else {
+		port, err := freePort()
 		if err != nil {
 			return nil, err
 		}
-		cmd.Stdout, cmd.Stderr = logf, logf
-		setDeathSignal(cmd)
-		if err := cmd.Start(); err != nil {
-			logf.Close()
-			return nil, err
-		}
-		m.cmd = cmd
-		go func() {
-			m.err = cmd.Wait()
-			logf.Close()
-			m.once.Do(func() { close(m.done) })
-		}()
-		select {
-		case <-m.done:
-			b, _ := os.ReadFile(logPath)
-			lastErr = fmt.Errorf("qemu exited: %v: %s", m.err, strings.TrimSpace(string(b)))
-			if useVsock && strings.Contains(string(b), "vhost-vsock") {
-				continue // CID clash
-			}
-			return nil, lastErr
-		case <-time.After(300 * time.Millisecond):
-		}
-		return m, nil
+		m.tcpAddr = fmt.Sprintf("127.0.0.1:%d", port)
+		netdev += fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:1024", port)
+		cmdline += " oar.tcp=1024"
 	}
-	return nil, lastErr
+	args := []string{
+		"-machine", machine, "-cpu", cpu,
+		"-smp", strconv.Itoa(cfg.CPUs), "-m", strconv.Itoa(cfg.MemoryMiB),
+		"-nodefaults", "-no-user-config", "-nographic", "-no-reboot",
+		"-kernel", cfg.Kernel, "-initrd", cfg.Initrd,
+		"-append", cmdline,
+		"-serial", "file:" + cfg.ConsoleLog,
+		"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=writeback",
+		"-device", "virtio-blk-pci,drive=data",
+		"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0,romfile=",
+		"-device", "virtio-rng-pci",
+		"-monitor", "none",
+	}
+	args = append(args, transport...)
+	cmd := exec.Command(qemuBinary(arch), args...)
+	logPath := filepath.Join(cfg.Dir, "qemu.log")
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout, cmd.Stderr = logf, logf
+	setDeathSignal(cmd)
+	if err := cmd.Start(); err != nil {
+		logf.Close()
+		return nil, err
+	}
+	m.cmd = cmd
+	go func() {
+		err := cmd.Wait()
+		logf.Close()
+		b, _ := os.ReadFile(logPath)
+		m.err = fmt.Errorf("qemu exited: %v: %s", err, strings.TrimSpace(string(b)))
+		m.once.Do(func() { close(m.done) })
+	}()
+	// Return at once: the supervisor polls the agent and watches Done,
+	// so early qemu failures still surface (with qemu's output). CIDs
+	// are random in a 2^30 space, so clashes are not retried.
+	return m, nil
 }
 
 func (m *qemuMachine) DialAgent(ctx context.Context) (net.Conn, error) {
@@ -211,6 +201,9 @@ func (m *qemuMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 }
 
 func (m *qemuMachine) Done() <-chan struct{} { return m.done }
+
+// ExitErr describes why qemu exited (valid after Done is closed).
+func (m *qemuMachine) ExitErr() error { return m.err }
 
 func (m *qemuMachine) Kill() error {
 	if m.cmd.Process != nil {

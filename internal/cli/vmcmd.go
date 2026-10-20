@@ -139,7 +139,7 @@ func addStartFlags(c *cobra.Command, o *vmStartOpts) {
 	c.Flags().IntVar(&o.cpus, "cpus", 2, "guest vCPUs")
 	c.Flags().IntVar(&o.memory, "memory", 2048, "guest memory (MiB)")
 	c.Flags().IntVar(&o.disk, "disk", 20, "guest data disk size (GiB, sparse)")
-	c.Flags().StringVar(&o.guestDir, "guest-dir", "", "directory containing kernel and initramfs.cpio.gz")
+	c.Flags().StringVar(&o.guestDir, "guest-dir", "", "directory containing kernel and initramfs.cpio.lz4")
 	c.Flags().StringVar(&o.root, "root", "", "cache directory for the native backend (default /var/lib/oar)")
 }
 

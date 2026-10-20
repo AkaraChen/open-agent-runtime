@@ -229,7 +229,12 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		// Short attempts: before the agent listens, a vsock connect or a
 		// forwarded TCP connection can hang instead of failing, and a long
 		// timeout would delay readiness by up to that timeout.
-		cctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+		// 200 ms attempts at first; slow (emulated) guests get longer ones
+		attempt := 200 * time.Millisecond
+		if time.Since(st.Started) > 20*time.Second {
+			attempt = time.Second
+		}
+		cctx, cancel := context.WithTimeout(ctx, attempt)
 		err = guest.Call(cctx, proto.OpInfo, nil, &info)
 		cancel()
 		if err == nil {
@@ -237,6 +242,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		}
 		select {
 		case <-m.Done():
+			if e, ok := m.(interface{ ExitErr() error }); ok && e.ExitErr() != nil {
+				return fail(fmt.Errorf("guest exited during boot: %w (see %s)", e.ExitErr(), cfg.ConsoleLog))
+			}
 			return fail(fmt.Errorf("guest exited during boot (see %s)", cfg.ConsoleLog))
 		case <-ctx.Done():
 			m.Kill()
@@ -346,11 +354,16 @@ func GuestImage(home, arch, override string) (kernel, initrd string, err error) 
 	}
 	dirs = append(dirs, filepath.Join("guest", "out", arch))
 	for _, d := range dirs {
-		k, i := filepath.Join(d, "kernel"), filepath.Join(d, "initramfs.cpio.gz")
-		if fileExists(k) && fileExists(i) {
-			ka, _ := filepath.Abs(k)
-			ia, _ := filepath.Abs(i)
-			return ka, ia, nil
+		k := filepath.Join(d, "kernel")
+		// LZ4 since step 6 of the benchmark roadmap (faster to unpack);
+		// gzip images built earlier still boot
+		for _, name := range []string{"initramfs.cpio.lz4", "initramfs.cpio.gz"} {
+			i := filepath.Join(d, name)
+			if fileExists(k) && fileExists(i) {
+				ka, _ := filepath.Abs(k)
+				ia, _ := filepath.Abs(i)
+				return ka, ia, nil
+			}
 		}
 	}
 	return "", "", fmt.Errorf("guest image for %s not found (looked in %s); build it with guest/build.sh %s or set OAR_GUEST_DIR",
