@@ -2,3 +2,5 @@
 /guest/out/
 /guest/.cache/
 *.tmp
+/internal/nixeval/iets/lib/
+/rust/iets-ffi/target/
