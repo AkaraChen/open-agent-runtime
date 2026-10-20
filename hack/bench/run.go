@@ -769,6 +769,11 @@ func joinMs(v []float64) string {
 func (b *bench) phaseStart() error {
 	const g = "4-start"
 	pre, _ := b.stats()
+	// DIAG: how long the guest needs to write back what warm left, and
+	// whether the first start is still slow afterwards
+	tSync := time.Now()
+	b.statsArgs(proto.StatsArgs{Sync: true})
+	syncMs := ms(time.Since(tSync))
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err
@@ -777,7 +782,7 @@ func (b *bench) phaseStart() error {
 	b.add(g, "first.total", "首次启动该组合（端到端，CLI，紧接预热之后）", "ms", true, ms(wall)).Note =
 		fmt.Sprintf("compose %.1f ms（其中挂载 store 视图 %.1f ms，cached=%v），create %.0f ms；启动前 guest 脏页 %.0f MiB、写回中 %.0f MiB，挂载 %d 个，视图 %d 个",
 			t.Compose/1e6, t.StoreView/1e6, first.Result.Cached, t.Create/1e6,
-			float64(pre.Dirty)/(1<<20), float64(pre.Writeback)/(1<<20), pre.Mounts, pre.StoreViews)
+			float64(pre.Dirty)/(1<<20), float64(pre.Writeback)/(1<<20), pre.Mounts, pre.StoreViews) + fmt.Sprintf("；DIAG 启动前 sync 耗时 %.0f ms", syncMs)
 	// the same for combos that were warmed but never started, after the
 	// guest wrote its dirty pages back: separates first-start cost from
 	// the write-back of the preceding warm
