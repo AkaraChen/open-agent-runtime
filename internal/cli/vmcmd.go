@@ -107,7 +107,29 @@ func vmCmd(g *globalOpts) *cobra.Command {
 			}
 		},
 	}
-	c.AddCommand(start, stop, status, supervise, backends)
+	statsCmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show guest resource usage (cache sizes, mounts, memory, boot timeline)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cl, err := connect(cmd.Context(), g)
+			if err != nil {
+				return err
+			}
+			var st proto.StatsResult
+			if err := cl.Call(cmd.Context(), proto.OpStats, nil, &st); err != nil {
+				return err
+			}
+			g.print(st, func() {
+				fmt.Printf("memory: %s available of %s (page cache %s)\n", human(st.MemAvailable), human(st.MemTotal), human(st.Cached))
+				fmt.Printf("mounts %d, store views %d, instances %d, cgroups %d, load %.2f\n", st.Mounts, st.StoreViews, st.Instances, st.Cgroups, st.Load1)
+				for _, k := range sortedKeys(st.CacheBytes) {
+					fmt.Printf("cache %-10s %10s  %8d files\n", k, human(st.CacheBytes[k]), st.CacheFiles[k])
+				}
+			})
+			return nil
+		},
+	}
+	c.AddCommand(start, stop, status, supervise, backends, statsCmd)
 	return c
 }
 

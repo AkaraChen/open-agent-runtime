@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
@@ -25,6 +26,23 @@ type Options struct {
 	Platforms []string // empty: all platforms declared in the config
 	Update    bool     // re-resolve the base image tag
 	Log       io.Writer
+	// Stats, if non-nil, receives timing and transfer statistics.
+	Stats *Stats
+}
+
+// Stats describes where a build spent its time and what it transferred.
+type Stats struct {
+	Total         time.Duration `json:"total"`
+	Base          time.Duration `json:"base"`
+	Eval          time.Duration `json:"eval"`
+	Fetch         time.Duration `json:"fetch"`
+	Components    time.Duration `json:"components"`
+	Checks        time.Duration `json:"checks"`
+	EvaluatedAttr int           `json:"evaluatedAttrs"`
+	FetchedPaths  int           `json:"fetchedPaths"`
+	FetchedBytes  int64         `json:"fetchedBytes"`
+	ClosurePaths  int           `json:"closurePaths"`
+	ClosureBytes  int64         `json:"closureBytes"`
 }
 
 // Builder holds state for one build invocation.
@@ -137,6 +155,11 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 	if opts.Log == nil {
 		opts.Log = io.Discard
 	}
+	if opts.Stats == nil {
+		opts.Stats = &Stats{}
+	}
+	start := time.Now()
+	defer func() { opts.Stats.Total = time.Since(start) }()
 	b := &Builder{ctx: ctx, cfg: cfg, opts: opts}
 	if prev, err := manifest.Read(LockPath(opts.Artifacts)); err == nil {
 		b.prev = prev
@@ -197,10 +220,13 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 	if err != nil {
 		return nil, err
 	}
+	st := b.opts.Stats
+	t := time.Now()
 	base, err := b.buildBase(p, indexDigest)
 	if err != nil {
 		return nil, err
 	}
+	st.Base += time.Since(t)
 	pl := &manifest.PlatformLock{
 		Platform: p.String(),
 		Base:     base.Base,
@@ -223,6 +249,7 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 	var storeIndex map[string]*storeMeta
 	if len(nixRefs) > 0 {
 		evals := map[string]evalResult{} // keyed by rev + "/" + attr
+		t = time.Now()
 		for _, rev := range sortedKeys(byRev) {
 			res, err := b.evalPackages(p, rev, byRev[rev])
 			if err != nil {
@@ -236,11 +263,14 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 		for _, r := range nixRefs {
 			roots = append(roots, evals[b.cfg.NixRevision(r)+"/"+r.Name].Outputs...)
 		}
+		st.Eval += time.Since(t)
+		t = time.Now()
 		var err error
 		storeIndex, err = b.fetchClosure(roots)
 		if err != nil {
 			return nil, err
 		}
+		st.Fetch += time.Since(t)
 		for _, r := range nixRefs {
 			rev := b.cfg.NixRevision(r)
 			ev := evals[rev+"/"+r.Name]
@@ -256,12 +286,15 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 			pl.StorePaths = append(pl.StorePaths, m.StorePath)
 			total += m.Size
 		}
+		st.ClosurePaths += len(storeIndex)
+		st.ClosureBytes += total
 		if b.fetched > 0 {
 			b.logf("closure for %s: %d store paths, %s (%d fetched)", p, len(storeIndex), humanSize(total), b.fetched)
 		}
 	}
 
 	// Imported components
+	t = time.Now()
 	for _, r := range refs {
 		if r.Kind == spec.KindNix {
 			continue
@@ -272,12 +305,15 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 		}
 		pl.Components = append(pl.Components, *c)
 	}
+	st.Components += time.Since(t)
 
+	t = time.Now()
 	pl.Normalize()
 	warnings, err := checkConflicts(pl, base, storeIndex, p)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { st.Checks += time.Since(t) }()
 	pl.Warnings = warnings
 	if err := b.resolveProcess(pl, base); err != nil {
 		return nil, err

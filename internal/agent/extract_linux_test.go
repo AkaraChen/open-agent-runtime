@@ -39,7 +39,7 @@ func TestExtract(t *testing.T) {
 		{Name: "bin", Typeflag: tar.TypeSymlink, Linkname: "usr/bin"},
 		{Name: "usr/bin/tool2", Typeflag: tar.TypeLink, Linkname: "usr/bin/tool"},
 	}, map[string]string{"usr/bin/tool": "#!/bin/sh\n"})
-	if err := extractTar(buf, dest); err != nil {
+	if _, err := extractTar(buf, dest); err != nil {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(filepath.Join(dest, "usr/bin"))
@@ -62,7 +62,7 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 		{Name: "etc", Typeflag: tar.TypeSymlink, Linkname: outside},
 		{Name: "etc/passwd", Typeflag: tar.TypeReg, Mode: 0o644},
 	}, map[string]string{"etc/passwd": "pwned"})
-	if err := extractTar(buf, dest); err == nil {
+	if _, err := extractTar(buf, dest); err == nil {
 		t.Fatal("expected traversal error")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "passwd")); err == nil {
@@ -73,7 +73,7 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 func TestExtractDotDot(t *testing.T) {
 	dest := t.TempDir()
 	buf := mkTar(t, []*tar.Header{{Name: "../../escape", Typeflag: tar.TypeReg, Mode: 0o644}}, map[string]string{"../../escape": "x"})
-	if err := extractTar(buf, dest); err != nil {
+	if _, err := extractTar(buf, dest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "escape")); err != nil {

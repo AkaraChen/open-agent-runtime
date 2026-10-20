@@ -121,7 +121,10 @@ type warmStats struct {
 	Total    int           `json:"total"`
 	Uploaded int           `json:"uploaded"`
 	Bytes    int64         `json:"bytes"`
+	Files    int64         `json:"files"`
 	Duration time.Duration `json:"duration"`
+	// GuestTime is the summed agent-side extraction time.
+	GuestTime time.Duration `json:"guestTime"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -146,7 +149,7 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	}
 	// biggest first keeps the pipeline busy
 	sort.Slice(st.Missing, func(i, j int) bool { return st.Missing[i].Size > st.Missing[j].Size })
-	var sent atomic.Int64
+	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
 	eg, ectx := errgroup.WithContext(ctx)
@@ -159,9 +162,12 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 			if err != nil {
 				return fmt.Errorf("artifact %s missing locally (%w); run oar build", p, err)
 			}
-			if err := s.putWithRetry(ectx, it, p); err != nil {
+			var pr proto.WarmPutResult
+			if err := s.putWithRetry(ectx, it, p, &pr); err != nil {
 				return fmt.Errorf("warm %s %s: %w", it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), err)
 			}
+			files.Add(int64(pr.Files))
+			guest.Add(int64(pr.Duration))
 			n := sent.Add(fi.Size())
 			if verbose {
 				// report large artifacts and every 25% of progress
@@ -180,13 +186,15 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 		return nil, err
 	}
 	stats.Bytes = sent.Load()
+	stats.Files = files.Load()
+	stats.GuestTime = time.Duration(guest.Load())
 	stats.Duration = time.Since(start)
 	return stats, nil
 }
 
 // putWithRetry uploads one artifact, retrying transport failures. Errors
 // reported by the agent itself (e.g. checksum mismatch) are not retried.
-func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string) error {
+func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, res *proto.WarmPutResult) error {
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
 		err = func() error {
@@ -199,7 +207,7 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string)
 			if err != nil {
 				return err
 			}
-			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it}, f, fi.Size(), nil, nil)
+			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it}, f, fi.Size(), res, nil)
 		}()
 		var re *proto.RemoteError
 		if err == nil || errors.As(err, &re) || ctx.Err() != nil {

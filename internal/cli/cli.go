@@ -118,13 +118,18 @@ func buildCmd(g *globalOpts) *cobra.Command {
 				return err
 			}
 			start := time.Now()
+			stats := &builder.Stats{}
 			lock, err := builder.Build(cmd.Context(), cfg, builder.Options{
-				Artifacts: g.artifactsDir(cfg), Platforms: platforms, Update: update, Log: logWriter(g),
+				Artifacts: g.artifactsDir(cfg), Platforms: platforms, Update: update, Log: logWriter(g), Stats: stats,
 			})
 			if err != nil {
 				return err
 			}
-			g.print(lock, func() {
+			out := struct {
+				*manifest.Lock
+				Stats *builder.Stats `json:"stats"`
+			}{lock, stats}
+			g.print(out, func() {
 				fmt.Printf("built in %s -> %s\n", time.Since(start).Round(time.Millisecond), builder.LockPath(g.artifactsDir(cfg)))
 				printDigests(lock, platforms)
 			})

@@ -101,7 +101,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return nil, s.warmPut(a.Item, body, req.BodySize)
+		return s.warmPut(a.Item, body, req.BodySize)
 	case proto.OpCompose:
 		var a proto.ComposeArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -166,6 +166,8 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 			return nil, err
 		}
 		return proto.ExecResult{ExitCode: code, Stdout: out, Stderr: errOut}, nil
+	case proto.OpStats:
+		return s.stats(), nil
 	case proto.OpShutdown:
 		if s.cfg.Shutdown == nil {
 			return nil, fmt.Errorf("shutdown is only supported inside the guest VM")
@@ -225,7 +227,18 @@ func (s *Server) warmStatus(a proto.WarmStatusArgs) proto.WarmStatusResult {
 
 // warmPut receives a tarball, verifies its sha256 against the key while
 // extracting it into a staging directory, then atomically publishes it.
-func (s *Server) warmPut(it proto.WarmItem, body io.Reader, size int64) error {
+func (s *Server) warmPut(it proto.WarmItem, body io.Reader, size int64) (*proto.WarmPutResult, error) {
+	start := time.Now()
+	res := &proto.WarmPutResult{}
+	err := s.warmPutInto(it, body, size, res)
+	res.Duration = time.Since(start)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (s *Server) warmPutInto(it proto.WarmItem, body io.Reader, size int64, res *proto.WarmPutResult) error {
 	final, err := s.itemPath(it)
 	if err != nil {
 		return err
@@ -257,9 +270,11 @@ func (s *Server) warmPut(it proto.WarmItem, body io.Reader, size int64) error {
 			return err
 		}
 	}
-	if err := extractTar(&cr, extractRoot); err != nil {
+	files, err := extractTar(&cr, extractRoot)
+	if err != nil {
 		return fmt.Errorf("extract %s %s: %w", it.Kind, it.Key, err)
 	}
+	res.Files, res.Bytes = files, size
 	if _, err := io.Copy(io.Discard, &cr); err != nil {
 		return err
 	}

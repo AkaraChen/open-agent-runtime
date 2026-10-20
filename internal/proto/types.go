@@ -34,6 +34,31 @@ type WarmItem struct {
 	Size int64  `json:"size,omitempty"`
 }
 
+// WarmPutResult reports what one upload extracted.
+type WarmPutResult struct {
+	Files    int           `json:"files"`
+	Bytes    int64         `json:"bytes"`
+	Duration time.Duration `json:"duration"`
+}
+
+// StatsResult is a snapshot of guest resource usage, for benchmarks and
+// leak detection.
+type StatsResult struct {
+	CacheBytes   map[string]int64 `json:"cacheBytes"` // per cache area
+	CacheFiles   map[string]int64 `json:"cacheFiles"`
+	Mounts       int              `json:"mounts"`
+	StoreViews   int              `json:"storeViews"`
+	Instances    int              `json:"instances"`
+	Cgroups      int              `json:"cgroups"`
+	MemTotal     int64            `json:"memTotal"`
+	MemAvailable int64            `json:"memAvailable"`
+	Cached       int64            `json:"cached"`
+	Uptime       float64          `json:"uptime"`
+	Load1        float64          `json:"load1"`
+	// Boot holds guest uptimes (seconds) at boot milestones (vm mode).
+	Boot map[string]float64 `json:"boot,omitempty"`
+}
+
 // WarmStatusArgs asks which items are missing.
 type WarmStatusArgs struct {
 	Items []WarmItem `json:"items"`

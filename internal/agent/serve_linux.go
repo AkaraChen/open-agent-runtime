@@ -58,6 +58,9 @@ func Serve(ctx context.Context, ls []net.Listener, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Mode == "vm" {
+		markBoot("agentReady")
+	}
 	errc := make(chan error, len(ls))
 	for _, l := range ls {
 		fmt.Fprintf(os.Stderr, "oar-agent %s listening on %s (mode=%s root=%s)\n", Version, l.Addr(), cfg.Mode, cfg.Root)
