@@ -137,8 +137,9 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	}
 	stats := &warmStats{Total: len(items), Uploaded: len(st.Missing)}
 	if len(st.Missing) == 0 {
+		err := s.precompose(ctx)
 		stats.Duration = time.Since(start)
-		return stats, nil
+		return stats, err
 	}
 	var total int64
 	for _, it := range st.Missing {
@@ -185,6 +186,9 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
+	if err := s.precompose(ctx); err != nil {
+		return nil, err
+	}
 	stats.Bytes = sent.Load()
 	stats.Files = files.Load()
 	stats.GuestTime = time.Duration(guest.Load())
@@ -216,6 +220,14 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 		time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 	}
 	return err
+}
+
+// precompose builds the bundle template and its /nix/store view in the
+// guest, so the first start of a freshly warmed bundle is as fast as later
+// ones.
+func (s *session) precompose(ctx context.Context) error {
+	var res proto.ComposeResult
+	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock}, &res)
 }
 
 func firstNonEmpty(a, b string) string {
@@ -350,6 +362,9 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 				if res.Replaced != "" {
 					verb = "reloaded"
 				}
+				if res.Prepared {
+					verb += " (prepared instance)"
+				}
 				fmt.Printf("%s %s (%s, pid %d)\n  bundle %s\n", verb, c.Name, c.ID, c.Pid, c.BundleDigest)
 				t := res.Timings
 				fmt.Printf("  compose %s (cached=%v), instantiate %s, runc create %s, start %s",
@@ -377,6 +392,39 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 			"overlap: start new, then stop old (needs SO_REUSEPORT for shared ports); replace: create new, stop old, start new")
 		c.Flags().DurationVar(&stopTimeout, "stop-timeout", 10*time.Second, "grace period for the old instance")
 	}
+	return c
+}
+
+func prepareCmd(g *globalOpts) *cobra.Command {
+	var name string
+	var noBuild bool
+	c := &cobra.Command{
+		Use:   "prepare",
+		Short: "Create (but do not start) the next instance, so a following run/reload of the same bundle skips compose, mount and runc create",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			if name == "" {
+				name = g.defaultName()
+			}
+			s, err := open(ctx, g, !noBuild)
+			if err != nil {
+				return err
+			}
+			if _, err := s.warm(ctx, !g.jsonOut); err != nil {
+				return err
+			}
+			var res proto.RunResult
+			if err := s.client.Call(ctx, proto.OpPrepare, proto.RunArgs{Name: name, Lock: s.lock}, &res); err != nil {
+				return err
+			}
+			g.print(res, func() {
+				fmt.Printf("prepared %s (%s) for bundle %s in %s\n", name, res.Container.ID, shortKey(res.Container.BundleDigest), res.Timings.Total.Round(time.Millisecond))
+			})
+			return nil
+		},
+	}
+	c.Flags().StringVar(&name, "name", "", "container name (default: config directory name)")
+	c.Flags().BoolVar(&noBuild, "no-build", false, "use the existing lock without rebuilding")
 	return c
 }
 

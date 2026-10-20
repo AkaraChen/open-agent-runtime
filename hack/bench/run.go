@@ -529,7 +529,7 @@ func (b *bench) idleResources(window time.Duration) (float64, float64, string) {
 		return 0, 0, "native 后端没有 VM；agent 运行在 supervisor 进程内"
 	}
 	sample := func() (float64, float64) {
-		out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,rss=,time=").Output()
+		out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,rss=,time=,comm=").Output()
 		if err != nil {
 			return 0, 0
 		}
@@ -539,6 +539,7 @@ func (b *bench) idleResources(window time.Duration) (float64, float64, string) {
 			cpu  float64
 		}
 		procs := map[int]p{}
+		in := map[int]bool{state.Pid: true}
 		for _, l := range strings.Split(string(out), "\n") {
 			f := strings.Fields(l)
 			if len(f) < 4 {
@@ -548,8 +549,12 @@ func (b *bench) idleResources(window time.Duration) (float64, float64, string) {
 			ppid, _ := strconv.Atoi(f[1])
 			rss, _ := strconv.ParseFloat(f[2], 64)
 			procs[pid] = p{ppid, rss * 1024, parseCPUTime(f[3])}
+			// Virtualization.framework runs the VM in an XPC service that is
+			// not a child of the supervisor
+			if len(f) > 4 && strings.Contains(strings.Join(f[4:], " "), "com.apple.Virtualization.VirtualMachine") {
+				in[pid] = true
+			}
 		}
-		in := map[int]bool{state.Pid: true}
 		for changed := true; changed; {
 			changed = false
 			for pid, pr := range procs {
@@ -568,7 +573,11 @@ func (b *bench) idleResources(window time.Duration) (float64, float64, string) {
 	_, c0 := sample()
 	time.Sleep(window)
 	rss, c1 := sample()
-	return rss, 100 * (c1 - c0) / window.Seconds(), "ps 采样"
+	note := "ps 采样"
+	if b.backend == "vz" {
+		note = "ps 采样，含 com.apple.Virtualization.VirtualMachine XPC 进程"
+	}
+	return rss, 100 * (c1 - c0) / window.Seconds(), note
 }
 
 // parseCPUTime parses ps TIME ([[dd-]hh:]mm:ss[.cc]).
@@ -832,7 +841,8 @@ func (b *bench) phaseRuntime() error {
 	b.na(g, "net.inbound", "宿主机 → 容器服务（端口转发）", "尚未实现（路线图 P1）")
 
 	// page cache sharing: read the same store path from two containers
-	readCmd := "find $(ls -d /nix/store/*-nodejs-slim-22* | head -1) -type f -exec cat {} + > /dev/null"
+	// icu4c is in the closure but not touched by the workload above
+	readCmd := "find $(ls -d /nix/store/*-icu4c-78* | grep -v dev | head -1) -type f -exec cat {} + > /dev/null"
 	if b.backend != "native" {
 		s0, _ := b.stats()
 		b.exec("work", "sh", "-c", readCmd)
@@ -971,7 +981,7 @@ func (b *bench) probeSummary() (map[string]float64, error) {
 	return nil, fmt.Errorf("probe printed no summary")
 }
 
-func (b *bench) switchSeries(strategy, a, bb string, n int) (wall, guest, down []float64, err error) {
+func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down []float64, err error) {
 	if _, _, err = b.run("svc", b.digests[a]); err != nil {
 		return
 	}
@@ -983,6 +993,12 @@ func (b *bench) switchSeries(strategy, a, bb string, n int) (wall, guest, down [
 		target := bb
 		if i%2 == 1 {
 			target = a
+		}
+		if prepare {
+			if _, e := b.oarJSON(nil, "--bundle", b.digests[target], "prepare", "--name", "svc"); e != nil {
+				err = e
+				return
+			}
 		}
 		var r runOut
 		d, e := b.oarJSON(&r, "--bundle", b.digests[target], "reload", "--name", "svc", "--strategy", strategy)
@@ -1005,11 +1021,15 @@ func (b *bench) phaseSwitch() error {
 	if !b.quick {
 		n = 30
 	}
-	for _, sc := range []struct{ strategy, a, b, label string }{
-		{"overlap", "a", "b", "overlap + SO_REUSEPORT"},
-		{"replace", "a-plain", "b-plain", "replace"},
+	for _, sc := range []struct {
+		strategy, a, b, label, key string
+		prepare                    bool
+	}{
+		{"overlap", "a", "b", "overlap + SO_REUSEPORT", "overlap", false},
+		{"replace", "a-plain", "b-plain", "replace", "replace", false},
+		{"overlap", "a", "b", "overlap + 预创建（prepare）", "prepared", true},
 	} {
-		wall, guest, down, err := b.switchSeries(sc.strategy, sc.a, sc.b, n)
+		wall, guest, down, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
 		if err != nil {
 			b.rm("svc")
 			b.rm("probe")
@@ -1020,15 +1040,15 @@ func (b *bench) phaseSwitch() error {
 		if err != nil {
 			return err
 		}
-		b.add(g, sc.strategy+".wall", sc.label+"：切换耗时（CLI 墙钟）", "ms", true, wall...)
-		b.add(g, sc.strategy+".guest", sc.label+"：切换耗时（guest 内）", "ms", true, guest...)
+		b.add(g, sc.key+".wall", sc.label+"：切换耗时（CLI 墙钟）", "ms", true, wall...)
+		b.add(g, sc.key+".guest", sc.label+"：切换耗时（guest 内）", "ms", true, guest...)
 		if sc.strategy == "replace" {
-			b.add(g, sc.strategy+".down", sc.label+"：服务端停机窗口", "ms", true, down...)
+			b.add(g, sc.key+".down", sc.label+"：服务端停机窗口", "ms", true, down...)
 		}
 		total := sum["ok"] + sum["failed"]
-		b.add(g, sc.strategy+".failed", fmt.Sprintf("%s：客户端失败请求（%d 次切换）", sc.label, n), "个", true, sum["failed"]).Note =
+		b.add(g, sc.key+".failed", fmt.Sprintf("%s：客户端失败请求（%d 次切换）", sc.label, n), "个", true, sum["failed"]).Note =
 			fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
-		b.add(g, sc.strategy+".gap", sc.label+"：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
+		b.add(g, sc.key+".gap", sc.label+"：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
 	}
 
 	// rollback

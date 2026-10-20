@@ -46,7 +46,11 @@ type Server struct {
 	cfg    Config
 	layout compose.Layout
 	booted time.Time
-	mu     sync.Mutex // serializes container lifecycle operations
+	// mu is held shared by per-container operations and exclusively by
+	// operations on all containers (StopAll); names serializes operations
+	// on the same container name, so different containers start in parallel.
+	mu    sync.RWMutex
+	names sync.Map // name -> *sync.Mutex
 	// cleanups tracks background removal of retired instances
 	cleanups sync.WaitGroup
 	views    storeViews
@@ -122,6 +126,12 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 			return nil, err
 		}
 		return s.run(ctx, a, req.Op == proto.OpReload)
+	case proto.OpPrepare:
+		var a proto.RunArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return s.prepare(ctx, a)
 	case proto.OpStop:
 		var a proto.NameArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -323,7 +333,9 @@ type instance struct {
 	BundleDigest string    `json:"bundleDigest"`
 	Created      time.Time `json:"created"`
 	Retired      bool      `json:"retired,omitempty"`
-	dir          string
+	// Prepared instances are created (not started) ahead of a switch.
+	Prepared bool `json:"prepared,omitempty"`
+	dir      string
 }
 
 func (s *Server) instDir(id string) string { return filepath.Join(s.layout.InstancesDir(), id) }
@@ -355,7 +367,7 @@ func (s *Server) current(name string) (*instance, error) {
 	}
 	var found *instance
 	for _, in := range list {
-		if in.Name == name && !in.Retired {
+		if in.Name == name && !in.Retired && !in.Prepared {
 			found = in
 		}
 	}
@@ -398,8 +410,9 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		return nil, fmt.Errorf("unknown reload strategy %q (want overlap or replace)", a.Strategy)
 	}
 	t0 := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockName(a.Name)
+	defer unlock()
+	var err error
 	old, _ := s.current(a.Name)
 	if old != nil && !reload {
 		st := s.observe(ctx, old)
@@ -413,34 +426,23 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		old = nil
 	}
 
-	res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.ensureStoreView(res.Bundle); err != nil {
-		return nil, err
-	}
-	tCompose := time.Now()
-
-	in, err := s.instantiate(a.Name, res.Bundle)
-	if err != nil {
-		return nil, err
-	}
-	tInst := time.Now()
-
-	logf, err := os.OpenFile(filepath.Join(in.dir, "console.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
-		s.destroy(ctx, in, true)
-		return nil, err
-	}
-	defer logf.Close()
-	if err := s.cfg.Runc.Create(ctx, in.ID, in.dir, logf); err != nil {
-		s.destroy(ctx, in, true)
-		return nil, err
+	var in *instance
+	var cached, prepared bool
+	var tCompose, tInst time.Time
+	if p := s.takePrepared(ctx, a.Name, a.Lock.BundleDigest); p != nil {
+		in, cached, prepared = p, true, true
+		tCompose = time.Now()
+		tInst = tCompose
+	} else {
+		in, cached, tCompose, tInst, err = s.createInstance(ctx, a.Name, a)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tCreate := time.Now()
 	result := &proto.RunResult{
-		Cached:   res.Cached,
+		Cached:   cached,
+		Prepared: prepared,
 		Strategy: a.Strategy,
 		Timings: proto.Timings{
 			Compose:     tCompose.Sub(t0),
@@ -526,6 +528,104 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	result.Timings.Total = time.Since(t0)
 	result.Container = s.observe(ctx, in)
 	return result, nil
+}
+
+// createInstance composes the bundle, instantiates it and runs
+// `runc create`. The container's process is prepared but not started.
+func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArgs) (*instance, bool, time.Time, time.Time, error) {
+	res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
+	if err != nil {
+		return nil, false, time.Time{}, time.Time{}, err
+	}
+	if err := s.ensureStoreView(res.Bundle); err != nil {
+		return nil, false, time.Time{}, time.Time{}, err
+	}
+	tCompose := time.Now()
+	in, err := s.instantiate(name, res.Bundle)
+	if err != nil {
+		return nil, false, tCompose, time.Time{}, err
+	}
+	tInst := time.Now()
+	logf, err := os.OpenFile(filepath.Join(in.dir, "console.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		s.destroy(ctx, in, true)
+		return nil, false, tCompose, tInst, err
+	}
+	defer logf.Close()
+	if err := s.cfg.Runc.Create(ctx, in.ID, in.dir, logf); err != nil {
+		s.destroy(ctx, in, true)
+		return nil, false, tCompose, tInst, err
+	}
+	return in, res.Cached, tCompose, tInst, nil
+}
+
+// takePrepared returns the prepared instance for name if it matches digest
+// (and discards a prepared instance for another bundle).
+func (s *Server) takePrepared(ctx context.Context, name, digest string) *instance {
+	list, err := s.loadInstances()
+	if err != nil {
+		return nil
+	}
+	var found *instance
+	for _, in := range list {
+		if in.Name != name || !in.Prepared {
+			continue
+		}
+		if in.BundleDigest == digest && found == nil {
+			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && st.Status == "created" {
+				found = in
+				continue
+			}
+		}
+		s.destroy(ctx, in, true)
+	}
+	if found != nil {
+		found.Prepared = false
+		found.Created = time.Now().UTC()
+		if err := found.save(); err != nil {
+			return nil
+		}
+	}
+	return found
+}
+
+// prepare creates (but does not start) an instance of a bundle for name,
+// so the next run/reload of that bundle skips compose, mount and create.
+func (s *Server) prepare(ctx context.Context, a proto.RunArgs) (*proto.RunResult, error) {
+	if !validName(a.Name) {
+		return nil, fmt.Errorf("invalid container name %q", a.Name)
+	}
+	t0 := time.Now()
+	unlock := s.lockName(a.Name)
+	defer unlock()
+	// one prepared instance per name
+	if list, err := s.loadInstances(); err == nil {
+		for _, in := range list {
+			if in.Name == a.Name && in.Prepared {
+				if in.BundleDigest == a.Lock.BundleDigest {
+					return &proto.RunResult{Container: s.observe(ctx, in), Cached: true}, nil
+				}
+				s.destroy(ctx, in, true)
+			}
+		}
+	}
+	in, cached, tCompose, tInst, err := s.createInstance(ctx, a.Name, a)
+	if err != nil {
+		return nil, err
+	}
+	in.Prepared = true
+	if err := in.save(); err != nil {
+		s.destroy(ctx, in, true)
+		return nil, err
+	}
+	return &proto.RunResult{
+		Container: s.observe(ctx, in),
+		Cached:    cached,
+		Timings: proto.Timings{
+			Compose: tCompose.Sub(t0), Instantiate: tInst.Sub(tCompose),
+			Create: time.Since(tInst), Total: time.Since(t0),
+		},
+	}, nil
 }
 
 // waitReady polls a readiness check until it succeeds or times out.
@@ -640,8 +740,8 @@ func (s *Server) observe(ctx context.Context, in *instance) proto.Container {
 }
 
 func (s *Server) stop(ctx context.Context, a proto.NameArgs) (*proto.Container, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockName(a.Name)
+	defer unlock()
 	in, err := s.current(a.Name)
 	if err != nil {
 		return nil, err
@@ -665,8 +765,8 @@ func (s *Server) stop(ctx context.Context, a proto.NameArgs) (*proto.Container, 
 }
 
 func (s *Server) delete(ctx context.Context, a proto.NameArgs) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockName(a.Name)
+	defer unlock()
 	in, err := s.current(a.Name)
 	if err != nil {
 		return err
@@ -675,7 +775,18 @@ func (s *Server) delete(ctx context.Context, a proto.NameArgs) error {
 	if (st.Status == "running" || st.Status == "created") && !a.Force {
 		return fmt.Errorf("container %q is %s; stop it first or use --force", a.Name, st.Status)
 	}
-	return s.destroy(ctx, in, true)
+	if err := s.destroy(ctx, in, true); err != nil {
+		return err
+	}
+	// a prepared instance for a deleted name would never be used
+	if list, err := s.loadInstances(); err == nil {
+		for _, p := range list {
+			if p.Name == a.Name && p.Prepared {
+				s.destroy(ctx, p, true)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) list(ctx context.Context) (*proto.ListResult, error) {
@@ -685,8 +796,8 @@ func (s *Server) list(ctx context.Context) (*proto.ListResult, error) {
 	}
 	res := &proto.ListResult{Containers: []proto.Container{}}
 	for _, in := range list {
-		if in.Retired {
-			continue // being cleaned up after a reload
+		if in.Retired || in.Prepared {
+			continue // being cleaned up after a reload, or not started yet
 		}
 		res.Containers = append(res.Containers, s.observe(ctx, in))
 	}
@@ -741,6 +852,18 @@ func (s *Server) logs(ctx context.Context, a proto.LogsArgs, rs *proto.ResponseS
 			io.Copy(w, f)
 			return nil
 		}
+	}
+}
+
+// lockName takes the shared lifecycle lock plus the lock for one name.
+func (s *Server) lockName(name string) func() {
+	s.mu.RLock()
+	m, _ := s.names.LoadOrStore(name, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+		s.mu.RUnlock()
 	}
 }
 

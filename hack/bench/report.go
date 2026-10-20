@@ -151,21 +151,34 @@ func render(title, intro string, results []*Result, base map[string]*Result) str
 	}
 	sb.WriteString("\n读表方法：单值指标直接给出数值；多次采样的指标写成 `p50 / p99`。括号里是相对上一步基线的变化：🟢 表示改善，🔺 表示变差，≈ 表示变化不到 5%。— 表示该后端不适用，❌ 表示失败。\n\n")
 
-	// collect metric order from all results
+	// metric order and names come from the most complete result; metrics
+	// only present elsewhere are appended to their group
 	type key struct{ g, k string }
+	primary := results[0]
+	for _, r := range results {
+		if len(r.Metrics) > len(primary.Metrics) {
+			primary = r
+		}
+	}
 	var order []key
 	seen := map[key]bool{}
 	names := map[key]*Metric{}
-	for _, r := range results {
+	addFrom := func(r *Result) {
 		for i := range r.Metrics {
 			m := &r.Metrics[i]
 			k := key{m.Group, m.Key}
 			if !seen[k] {
 				seen[k] = true
 				order = append(order, k)
+			}
+			if prev, ok := names[k]; !ok || (prev.Status != "ok" && m.Status == "ok") {
 				names[k] = m
 			}
 		}
+	}
+	addFrom(primary)
+	for _, r := range results {
+		addFrom(r)
 	}
 	sort.SliceStable(order, func(i, j int) bool { return order[i].g < order[j].g })
 	group := ""
@@ -184,23 +197,19 @@ func render(title, intro string, results []*Result, base map[string]*Result) str
 		}
 		meta := names[k]
 		fmt.Fprintf(&sb, "| %s | %s |", meta.Name, meta.Unit)
-		var notes []string
+		notes := map[string]string{}
 		for _, r := range results {
 			m := find(r, k.g, k.k)
 			if m == nil {
-				sb.WriteString(" |")
+				sb.WriteString(" — |")
 				continue
 			}
 			fmt.Fprintf(&sb, " %s%s |", cell(m), delta(m, find(base[r.Backend], k.g, k.k)))
 			if m.Note != "" {
-				if len(results) > 1 {
-					notes = append(notes, r.Backend+"："+m.Note)
-				} else {
-					notes = append(notes, m.Note)
-				}
+				notes[r.Backend] = m.Note
 			}
 		}
-		fmt.Fprintf(&sb, " %s |\n", strings.Join(dedupe(notes), "；"))
+		fmt.Fprintf(&sb, " %s |\n", joinNotes(results, notes))
 	}
 	for _, r := range results {
 		for _, n := range r.Notes {
@@ -208,6 +217,30 @@ func render(title, intro string, results []*Result, base map[string]*Result) str
 		}
 	}
 	return sb.String()
+}
+
+// joinNotes prints a note once when every backend agrees, otherwise per
+// backend.
+func joinNotes(results []*Result, notes map[string]string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	uniq := map[string]bool{}
+	for _, n := range notes {
+		uniq[n] = true
+	}
+	if len(uniq) == 1 && len(notes) == len(results) {
+		for n := range uniq {
+			return n
+		}
+	}
+	var parts []string
+	for _, r := range results {
+		if n, ok := notes[r.Backend]; ok {
+			parts = append(parts, r.Backend+"："+n)
+		}
+	}
+	return strings.Join(dedupe(parts), "；")
 }
 
 func dedupe(in []string) []string {

@@ -221,7 +221,10 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	var info proto.InfoResult
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		// Short attempts: before the agent listens, a vsock connect or a
+		// forwarded TCP connection can hang instead of failing, and a long
+		// timeout would delay readiness by up to that timeout.
+		cctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 		err = guest.Call(cctx, proto.OpInfo, nil, &info)
 		cancel()
 		if err == nil {
@@ -233,7 +236,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		case <-ctx.Done():
 			m.Kill()
 			return fail(ctx.Err())
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(20 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
 			m.Kill()

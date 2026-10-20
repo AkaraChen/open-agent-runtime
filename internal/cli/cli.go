@@ -51,7 +51,7 @@ func Main(args []string) int {
 		buildCmd(g), digestCmd(g), bundlesCmd(g),
 		vmCmd(g),
 		warmCmd(g), composeCmd(g),
-		runCmd(g), reloadCmd(g), stopCmd(g), rmCmd(g), psCmd(g), logsCmd(g), execCmd(g),
+		runCmd(g), reloadCmd(g), prepareCmd(g), stopCmd(g), rmCmd(g), psCmd(g), logsCmd(g), execCmd(g),
 		nixEvalCmd(g),
 	)
 	root.SetVersionTemplate(fmt.Sprintf("oar version {{.Version}}\nnix evaluator: %s\n", nixeval.EmbeddedVersion()))

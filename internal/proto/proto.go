@@ -39,6 +39,7 @@ const (
 	OpExec       = "exec"
 	OpShutdown   = "shutdown"
 	OpStats      = "stats"
+	OpPrepare    = "prepare"
 )
 
 // Request header.

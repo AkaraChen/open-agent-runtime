@@ -124,8 +124,10 @@ type RunResult struct {
 	Container Container `json:"container"`
 	Cached    bool      `json:"cached"`
 	Strategy  string    `json:"strategy,omitempty"`
-	Timings   Timings   `json:"timings"`
-	Replaced  string    `json:"replaced,omitempty"`
+	// Prepared is true when a pre-created instance was used.
+	Prepared bool    `json:"prepared,omitempty"`
+	Timings  Timings `json:"timings"`
+	Replaced string  `json:"replaced,omitempty"`
 }
 
 // NameArgs addresses a container by name.
