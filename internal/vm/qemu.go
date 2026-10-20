@@ -119,6 +119,9 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		m := &qemuMachine{done: make(chan struct{})}
 		cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
+		if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
+			cmdline += " " + extra
+		}
 		netdev := "user,id=net0"
 		var transport []string
 		if useVsock {

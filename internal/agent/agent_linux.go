@@ -49,6 +49,7 @@ type Server struct {
 	mu     sync.Mutex // serializes container lifecycle operations
 	// cleanups tracks background removal of retired instances
 	cleanups sync.WaitGroup
+	views    storeViews
 	warmMu   sync.Map // per-key locks for warm.put
 }
 
@@ -109,6 +110,9 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		start := time.Now()
 		res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
 		if err != nil {
+			return nil, err
+		}
+		if err := s.ensureStoreView(res.Bundle); err != nil {
 			return nil, err
 		}
 		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers}, nil
@@ -396,6 +400,9 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 
 	res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureStoreView(res.Bundle); err != nil {
 		return nil, err
 	}
 	tCompose := time.Now()
@@ -736,6 +743,8 @@ func (s *Server) StopAll(ctx context.Context) {
 		}
 		s.destroy(ctx, in, true)
 	}
+	s.cleanups.Wait()
+	s.unmountAllStoreViews()
 }
 
 // SetShutdown installs the shutdown hook.

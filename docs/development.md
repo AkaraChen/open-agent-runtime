@@ -62,3 +62,4 @@ $ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
 | `OAR_NIX_SUBSTITUTERS`, `OAR_NIX_TRUSTED_KEYS` | binary caches and their keys |
 | `OAR_RUNC` | runc binary for the native backend |
 | `OAR_QEMU`, `OAR_QEMU_ACCEL`, `OAR_QEMU_TRANSPORT` | QEMU binary, accelerator, `tcp` transport |
+| `OAR_GUEST_CMDLINE` | extra guest kernel parameters (QEMU backends; debugging) |
