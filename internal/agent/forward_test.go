@@ -115,11 +115,9 @@ func freePort(tb testing.TB) int {
 // on 127.0.0.1 only) and a host forwarder on 127.0.0.2 talking to it over
 // the given control channel; a real VM has its own network stack.
 func guest(tb testing.TB, kind string) *agent.Server {
-	s, err := agent.New(agent.Config{Root: tb.TempDir(), Mode: "native"})
-	if err != nil {
-		tb.Fatal(err)
-	}
+	s := newAgent(tb)
 	var l net.Listener
+	var err error
 	var dial proto.Dialer
 	switch kind {
 	case "vm-tcp", "vm-slow":
@@ -173,6 +171,16 @@ func guest(tb testing.TB, kind string) *agent.Server {
 	return s
 }
 
+// newAgent creates an agent whose state lives in a temporary directory.
+func newAgent(tb testing.TB) *agent.Server {
+	dir := tb.TempDir()
+	s, err := agent.New(agent.Config{Root: dir, Mode: "native", Runc: agent.Runc{Root: dir + "/runc"}})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return s
+}
+
 func publicPorts(port int) []manifest.Port {
 	return []manifest.Port{{Name: "http", Port: port, Env: "PORT"}}
 }
@@ -208,10 +216,7 @@ func ingressPath(tb testing.TB, kind string) string {
 	}
 	pub := freePort(tb)
 	if kind == "native" {
-		s, err := agent.New(agent.Config{Root: tb.TempDir(), Mode: "native"})
-		if err != nil {
-			tb.Fatal(err)
-		}
+		s := newAgent(tb)
 		if _, err := s.Route("svc", "svc-a", map[string]int{"http": app}, publicPorts(pub)); err != nil {
 			tb.Fatal(err)
 		}
