@@ -69,7 +69,7 @@ func boot(ch, kernel, initrd, disk, dir string, memory int) (*result, error) {
 		"--kernel", kernel, "--initramfs", initrd,
 		"--cmdline", "console=ttyS0 panic=-1 quiet loglevel=3",
 		"--cpus", "boot=2", "--memory", fmt.Sprintf("size=%dM", memory),
-		"--disk", "path="+disk,
+		"--disk", "path="+disk+",image_type=raw",
 		"--vsock", "cid=3,socket="+sock,
 		"--serial", "file="+console, "--console", "off")
 	out, _ := os.Create(filepath.Join(dir, "ch.log"))
@@ -78,7 +78,9 @@ func boot(ch, kernel, initrd, disk, dir string, memory int) (*result, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	defer func() { cmd.Process.Kill(); <-exited }()
 	r := &result{}
 	client := &proto.Client{Dial: func(ctx context.Context) (net.Conn, error) { return dialHybrid(ctx, sock, 1024) }}
 	deadline := time.Now().Add(60 * time.Second)
@@ -95,6 +97,12 @@ func boot(ch, kernel, initrd, disk, dir string, memory int) (*result, error) {
 		if err == nil {
 			r.agent = time.Since(start)
 			break
+		}
+		select {
+		case <-exited:
+			b, _ := os.ReadFile(filepath.Join(dir, "ch.log"))
+			return nil, fmt.Errorf("cloud-hypervisor exited:\n%s", b)
+		default:
 		}
 		if time.Now().After(deadline) {
 			b, _ := os.ReadFile(filepath.Join(dir, "ch.log"))
