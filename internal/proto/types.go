@@ -111,6 +111,9 @@ type RunArgs struct {
 	Lock        *manifest.PlatformLock `json:"lock"`
 	Strategy    string                 `json:"strategy,omitempty"`
 	StopTimeout time.Duration          `json:"stopTimeout,omitempty"`
+	// Start makes prepare also start the instance and wait until it is
+	// ready (hot standby); it receives traffic only after the switch.
+	Start bool `json:"start,omitempty"`
 }
 
 // Timings of a run, all measured inside the guest.
@@ -120,7 +123,10 @@ type Timings struct {
 	Create      time.Duration `json:"create"`
 	Start       time.Duration `json:"start"`
 	Ready       time.Duration `json:"ready,omitempty"`
-	StopOld     time.Duration `json:"stopOld,omitempty"`
+	// Drain is how long the old instance kept serving in-flight connections
+	// after the ingress switched to the new one.
+	Drain   time.Duration `json:"drain,omitempty"`
+	StopOld time.Duration `json:"stopOld,omitempty"`
 	// Downtime is the window with no running instance (replace strategy).
 	Downtime time.Duration `json:"downtime,omitempty"`
 	Total    time.Duration `json:"total"`
@@ -135,6 +141,26 @@ type RunResult struct {
 	Prepared bool    `json:"prepared,omitempty"`
 	Timings  Timings `json:"timings"`
 	Replaced string  `json:"replaced,omitempty"`
+}
+
+// DialArgs opens a stream to a TCP port inside the guest network.
+type DialArgs struct {
+	Port int `json:"port"`
+}
+
+// Ingress is one public port served by the agent's ingress proxy.
+type Ingress struct {
+	Container string `json:"container"`
+	Name      string `json:"name"`
+	Port      int    `json:"port"`
+	Target    string `json:"target"`
+	Instance  string `json:"instance"`
+	Active    int64  `json:"active"`
+}
+
+// IngressList lists ingress ports.
+type IngressList struct {
+	Ingresses []Ingress `json:"ingresses"`
 }
 
 // NameArgs addresses a container by name.

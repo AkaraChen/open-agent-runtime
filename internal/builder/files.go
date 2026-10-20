@@ -218,19 +218,25 @@ func (b *Builder) buildComponent(ref spec.Ref, p spec.Platform) (*manifest.Compo
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
-	treePath := filepath.Join(dir, "tree.tar")
-	if err := os.Rename(tmp.Name(), treePath); err != nil {
-		return nil, err
-	}
+	// Content addressed: configs (or versions) that share a component name
+	// but differ in content must not overwrite each other's artifacts.
 	c.Key = "sha256:" + hex.EncodeToString(h.Sum(nil))
+	keyHex := hex.EncodeToString(h.Sum(nil))
+	treePath := filepath.Join(dir, keyHex+".tar")
+	fresh := false
+	if st, err := os.Stat(treePath); err != nil || st.Size() != cw.n {
+		if err := os.Rename(tmp.Name(), treePath); err != nil {
+			return nil, err
+		}
+		fresh = true
+	}
 	c.Size = cw.n
-	c.Path = filepath.ToSlash(filepath.Join("components", ref.Name, p.Slug(), "tree.tar"))
+	c.Path = filepath.ToSlash(filepath.Join("components", ref.Name, p.Slug(), keyHex+".tar"))
 	sort.Strings(c.Files)
-	var prev manifest.Component
-	if manifest.ReadJSON(filepath.Join(dir, "manifest.json"), &prev) != nil || prev.Key != c.Key {
+	if fresh {
 		b.logf("component %s (%s): %d entries, %s", ref, p, len(c.Files), humanSize(c.Size))
 	}
-	if err := manifest.WriteJSON(filepath.Join(dir, "manifest.json"), c); err != nil {
+	if err := manifest.WriteJSON(filepath.Join(dir, keyHex+".json"), c); err != nil {
 		return nil, err
 	}
 	return c, nil

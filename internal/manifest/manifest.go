@@ -37,8 +37,17 @@ type PlatformLock struct {
 	Hostname     string      `json:"hostname"`
 	// Ready is a lifecycle readiness check; it does not change what the
 	// container observes and is therefore not part of the bundle digest.
-	Ready    *Ready   `json:"ready,omitempty"`
+	Ready *Ready `json:"ready,omitempty"`
+	// Ports are served by the ingress proxy (lifecycle, not in the digest).
+	Ports    []Port   `json:"ports,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// Port is an ingress port.
+type Port struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+	Env  string `json:"env"`
 }
 
 // Ready is a readiness check.

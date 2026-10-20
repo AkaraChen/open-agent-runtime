@@ -391,6 +391,9 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 					if res.Strategy == proto.StrategyReplace {
 						fmt.Printf(", downtime %s", t.Downtime.Round(time.Millisecond))
 					}
+					if t.Drain > 0 {
+						fmt.Printf(", drained in-flight connections in %s", t.Drain.Round(time.Millisecond))
+					}
 					fmt.Println(")")
 				}
 			})
@@ -409,7 +412,7 @@ func runLike(g *globalOpts, reload bool) *cobra.Command {
 
 func prepareCmd(g *globalOpts) *cobra.Command {
 	var name string
-	var noBuild bool
+	var noBuild, start bool
 	c := &cobra.Command{
 		Use:   "prepare",
 		Short: "Create (but do not start) the next instance, so a following run/reload of the same bundle skips compose, mount and runc create",
@@ -426,7 +429,7 @@ func prepareCmd(g *globalOpts) *cobra.Command {
 				return err
 			}
 			var res proto.RunResult
-			if err := s.client.Call(ctx, proto.OpPrepare, proto.RunArgs{Name: name, Lock: s.lock}, &res); err != nil {
+			if err := s.client.Call(ctx, proto.OpPrepare, proto.RunArgs{Name: name, Lock: s.lock, Start: start}, &res); err != nil {
 				return err
 			}
 			g.print(res, func() {
@@ -437,6 +440,7 @@ func prepareCmd(g *globalOpts) *cobra.Command {
 	}
 	c.Flags().StringVar(&name, "name", "", "container name (default: config directory name)")
 	c.Flags().BoolVar(&noBuild, "no-build", false, "use the existing lock without rebuilding")
+	c.Flags().BoolVar(&start, "start", false, "also start it and wait until ready (hot standby; it gets traffic only after reload)")
 	return c
 }
 

@@ -40,6 +40,8 @@ const (
 	OpShutdown   = "shutdown"
 	OpStats      = "stats"
 	OpPrepare    = "prepare"
+	OpDial       = "dial"
+	OpIngress    = "ingress.list"
 )
 
 // Request header.
@@ -156,6 +158,61 @@ func isClosed(err error) bool {
 	return err != nil && (errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "deadline") || errors.Is(err, io.EOF))
 }
 
+// Stream opens a bidirectional byte stream: it sends the request header,
+// waits for a successful response, and returns a connection carrying the
+// raw stream (port forwarding).
+func (c *Client) Stream(ctx context.Context, op string, args any) (net.Conn, error) {
+	conn, err := c.Dial(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("connect to agent: %w", err)
+	}
+	req := Request{Op: op}
+	if args != nil {
+		b, err := json.Marshal(args)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		req.Args = b
+	}
+	hdr, _ := json.Marshal(req)
+	if _, err := conn.Write(append(hdr, '\n')); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	r := bufio.NewReader(conn)
+	line, err := r.ReadBytes('\n')
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if !resp.OK {
+		conn.Close()
+		return nil, &RemoteError{Msg: resp.Error}
+	}
+	return &bufferedConn{Conn: conn, r: r}, nil
+}
+
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// CloseWrite half-closes the underlying connection when supported.
+func (b *bufferedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // Handler serves one request. body is limited to req.BodySize bytes. It
 // returns the result; if it wants to stream a response body it writes to
 // the ResponseStream after calling Begin.
@@ -164,8 +221,20 @@ type Handler func(ctx context.Context, req *Request, body io.Reader, rs *Respons
 // ResponseStream lets handlers stream a response body.
 type ResponseStream struct {
 	conn    net.Conn
+	r       *bufio.Reader
 	w       *bufio.Writer
 	started bool
+}
+
+// Hijack writes a successful header and hands the raw connection to the
+// handler for a bidirectional byte stream (port forwarding). The returned
+// reader holds bytes the client may already have sent.
+func (rs *ResponseStream) Hijack(result any) (net.Conn, *bufio.Reader, error) {
+	if err := rs.header(Response{OK: true}, result); err != nil {
+		return nil, nil, err
+	}
+	rs.started = true
+	return rs.conn, rs.r, nil
 }
 
 // Begin writes a successful header with the given result and returns a
@@ -211,7 +280,7 @@ func Serve(ctx context.Context, conn net.Conn, h Handler) {
 	if err != nil {
 		return
 	}
-	rs := &ResponseStream{conn: conn, w: bufio.NewWriter(conn)}
+	rs := &ResponseStream{conn: conn, r: r, w: bufio.NewWriter(conn)}
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
 		rs.header(Response{Error: "bad request: " + err.Error()}, nil)

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,7 +67,12 @@ func main() {
 	b, _ := json.Marshal(report)
 
 	var srv *http.Server
-	if addr := os.Getenv("MY_AGENT_LISTEN"); addr != "" {
+	addr := os.Getenv("MY_AGENT_LISTEN")
+	// MY_AGENT_PORT is the private port assigned by oar's ingress proxy
+	if p := os.Getenv("MY_AGENT_PORT"); p != "" {
+		addr = "127.0.0.1:" + p
+	}
+	if addr != "" {
 		lc := net.ListenConfig{}
 		if os.Getenv("MY_AGENT_REUSEPORT") == "1" {
 			lc.Control = setReusePort
@@ -77,7 +83,17 @@ func main() {
 			os.Exit(1)
 		}
 		pid := fmt.Sprint(os.Getpid())
+		zero := make([]byte, 1<<20)
 		srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/blob" {
+				// throughput test: stream ?mib=N MiB of zeros
+				n, _ := strconv.Atoi(r.URL.Query().Get("mib"))
+				w.Header().Set("Content-Length", strconv.Itoa(n<<20))
+				for i := 0; i < n; i++ {
+					w.Write(zero)
+				}
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Variant", report["variant"])
 			w.Header().Set("X-Pid", pid)

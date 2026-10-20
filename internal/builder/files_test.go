@@ -3,6 +3,8 @@ package builder
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
 )
 
@@ -137,5 +140,32 @@ func TestImportInlineContent(t *testing.T) {
 	}
 	if h.Target != "/usr/local/bin/hello" || len(h.ELF) != 0 {
 		t.Fatalf("%+v", h)
+	}
+}
+
+func TestSameNameDifferentContentDoNotCollide(t *testing.T) {
+	v1, v2 := "port 18080\n", "port 18081\n"
+	b, _ := newTestBuilder(t, map[string]*spec.Source{"probe": {Content: &v1, Target: "/opt/probe"}})
+	c1, err := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "probe"}, arm64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Sources["probe"] = &spec.Source{Content: &v2, Target: "/opt/probe"}
+	c2, err := b.buildComponent(spec.Ref{Kind: spec.KindFile, Name: "probe"}, arm64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1.Key == c2.Key || c1.Path == c2.Path {
+		t.Fatalf("expected distinct artifacts, got %s and %s", c1.Path, c2.Path)
+	}
+	for _, c := range []*manifest.Component{c1, c2} {
+		data, err := os.ReadFile(filepath.Join(b.opts.Artifacts, filepath.FromSlash(c.Path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		if "sha256:"+hex.EncodeToString(sum[:]) != c.Key {
+			t.Fatalf("%s no longer matches its key", c.Path)
+		}
 	}
 }

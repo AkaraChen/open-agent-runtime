@@ -540,6 +540,9 @@ func (b *Builder) resolveProcess(pl *manifest.PlatformLock, base *BaseManifest) 
 	if r := pc.Ready; r != nil {
 		pl.Ready = &manifest.Ready{TCP: r.TCP, Exec: r.Exec, Log: r.Log, Timeout: r.Timeout}
 	}
+	for _, p := range pc.Ports {
+		pl.Ports = append(pl.Ports, manifest.Port{Name: p.Name, Port: p.Port, Env: p.Env})
+	}
 	return nil
 }
 

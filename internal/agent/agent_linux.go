@@ -54,6 +54,7 @@ type Server struct {
 	// cleanups tracks background removal of retired instances
 	cleanups sync.WaitGroup
 	views    storeViews
+	ing      ingresses
 
 	runcVerOnce sync.Once
 	runcVer     string
@@ -136,6 +137,14 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 			return nil, err
 		}
 		return s.run(ctx, a, req.Op == proto.OpReload)
+	case proto.OpDial:
+		var a proto.DialArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return nil, s.handleDial(a, rs)
+	case proto.OpIngress:
+		return s.ingressList(), nil
 	case proto.OpPrepare:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -356,9 +365,14 @@ type instance struct {
 	BundleDigest string    `json:"bundleDigest"`
 	Created      time.Time `json:"created"`
 	Retired      bool      `json:"retired,omitempty"`
-	// Prepared instances are created (not started) ahead of a switch.
+	// Prepared instances are created (not started) ahead of a switch;
+	// Started marks a prepared instance that already runs (hot standby).
 	Prepared bool `json:"prepared,omitempty"`
-	dir      string
+	Started  bool `json:"started,omitempty"`
+	// Ports maps ingress port names to this instance's private ports.
+	Ports       map[string]int  `json:"ports,omitempty"`
+	PublicPorts []manifest.Port `json:"publicPorts,omitempty"`
+	dir         string
 }
 
 func (s *Server) instDir(id string) string { return filepath.Join(s.layout.InstancesDir(), id) }
@@ -486,11 +500,36 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 			s.cfg.Runc.WaitStopped(ctx, old.ID, 5*time.Second)
 		}
 	}
+	standby := prepared && in.Started
 	ready := func() error {
+		if standby {
+			return nil // a hot standby is already running and ready
+		}
 		tR := time.Now()
-		err := s.waitReady(ctx, in, a.Lock.Ready)
+		err := s.waitReady(ctx, in, readyCheck(a.Lock, in))
 		result.Timings.Ready = time.Since(tR)
 		return err
+	}
+	startNew := func() error {
+		if standby {
+			return nil
+		}
+		return s.cfg.Runc.Start(ctx, in.ID)
+	}
+	// switchTraffic repoints the ingress at the new instance and waits for
+	// the old instance's in-flight connections.
+	switchTraffic := func() error {
+		if len(in.PublicPorts) == 0 {
+			return nil
+		}
+		olds, err := s.route(in)
+		if err != nil {
+			return err
+		}
+		if old != nil && len(olds) > 0 {
+			result.Timings.Drain = drain(ctx, olds, grace)
+		}
+		return nil
 	}
 	if old != nil && a.Strategy == proto.StrategyReplace {
 		// The new container is fully created (namespaces, mounts, cgroup)
@@ -500,7 +539,7 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		stopOld()
 		result.Timings.StopOld = time.Since(tStop)
 		tS := time.Now()
-		if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
+		if err := startNew(); err != nil {
 			s.destroy(ctx, in, true)
 			old.Retired = false
 			_ = old.save()
@@ -510,10 +549,13 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		if err := ready(); err != nil {
 			return nil, fmt.Errorf("new instance %s started but is not ready (old %s already stopped): %w", in.ID, old.ID, err)
 		}
+		if err := switchTraffic(); err != nil {
+			return nil, err
+		}
 		result.Timings.Downtime = time.Since(tStop)
 	} else {
 		tS := time.Now()
-		if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
+		if err := startNew(); err != nil {
 			s.destroy(ctx, in, true)
 			return nil, err
 		}
@@ -527,6 +569,15 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 				return nil, fmt.Errorf("new instance not ready, rolled back to %s: %w", old.ID, err)
 			}
 			return nil, fmt.Errorf("container %s started but is not ready: %w", in.ID, err)
+		}
+		if err := switchTraffic(); err != nil {
+			if old != nil {
+				s.cfg.Runc.Kill(ctx, in.ID, "KILL")
+				s.cfg.Runc.WaitStopped(ctx, in.ID, 5*time.Second)
+				s.destroy(ctx, in, true)
+				s.route(old) // keep the old instance serving
+			}
+			return nil, err
 		}
 		if old != nil {
 			// overlap: the new instance is serving; retire the old one
@@ -564,7 +615,17 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 		return nil, false, time.Time{}, time.Time{}, err
 	}
 	tCompose := time.Now()
-	in, err := s.instantiate(name, res.Bundle)
+	ports, err := allocatePorts(a.Lock.Ports)
+	if err != nil {
+		return nil, false, tCompose, time.Time{}, err
+	}
+	var env []string
+	for _, p := range a.Lock.Ports {
+		env = append(env, fmt.Sprintf("%s=%d", p.Env, ports[p.Name]))
+	}
+	in, err := s.instantiate(name, res.Bundle, env, func(in *instance) {
+		in.Ports, in.PublicPorts = ports, a.Lock.Ports
+	})
 	if err != nil {
 		return nil, false, tCompose, time.Time{}, err
 	}
@@ -595,7 +656,7 @@ func (s *Server) takePrepared(ctx context.Context, name, digest string) *instanc
 			continue
 		}
 		if in.BundleDigest == digest && found == nil {
-			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && st.Status == "created" {
+			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
 				found = in
 				continue
 			}
@@ -637,6 +698,27 @@ func (s *Server) prepare(ctx context.Context, a proto.RunArgs) (*proto.RunResult
 		return nil, err
 	}
 	in.Prepared = true
+	tCreate := time.Now()
+	var tStart, tReady time.Duration
+	if a.Start {
+		// hot standby: running and ready, but the ingress does not route
+		// to it until the switch
+		t := time.Now()
+		if err := s.cfg.Runc.Start(ctx, in.ID); err != nil {
+			s.destroy(ctx, in, true)
+			return nil, err
+		}
+		tStart = time.Since(t)
+		t = time.Now()
+		if err := s.waitReady(ctx, in, readyCheck(a.Lock, in)); err != nil {
+			s.cfg.Runc.Kill(ctx, in.ID, "KILL")
+			s.cfg.Runc.WaitStopped(ctx, in.ID, 5*time.Second)
+			s.destroy(ctx, in, true)
+			return nil, fmt.Errorf("standby not ready: %w", err)
+		}
+		tReady = time.Since(t)
+		in.Started = true
+	}
 	if err := in.save(); err != nil {
 		s.destroy(ctx, in, true)
 		return nil, err
@@ -646,9 +728,21 @@ func (s *Server) prepare(ctx context.Context, a proto.RunArgs) (*proto.RunResult
 		Cached:    cached,
 		Timings: proto.Timings{
 			Compose: tCompose.Sub(t0), Instantiate: tInst.Sub(tCompose),
-			Create: time.Since(tInst), Total: time.Since(t0),
+			Create: tCreate.Sub(tInst), Start: tStart, Ready: tReady, Total: time.Since(t0),
 		},
 	}, nil
+}
+
+// readyCheck returns the readiness check for an instance: the configured
+// one, or a TCP check on the first private ingress port.
+func readyCheck(pl *manifest.PlatformLock, in *instance) *manifest.Ready {
+	if pl.Ready != nil {
+		return pl.Ready
+	}
+	if len(pl.Ports) > 0 {
+		return &manifest.Ready{TCP: fmt.Sprintf("127.0.0.1:%d", in.Ports[pl.Ports[0].Name])}
+	}
+	return nil
 }
 
 // waitReady polls a readiness check until it succeeds or times out.
@@ -700,11 +794,14 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 
 // instantiate creates the per-instance bundle directory: an overlay mount of
 // the cached layers plus a config.json derived from the cached template.
-func (s *Server) instantiate(name string, b *compose.Bundle) (*instance, error) {
+func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, init func(*instance)) (*instance, error) {
 	var rnd [4]byte
 	rand.Read(rnd[:])
 	id := fmt.Sprintf("%s-%s", name, hex.EncodeToString(rnd[:]))
 	in := &instance{Name: name, ID: id, BundleDigest: b.Digest, Created: time.Now().UTC(), dir: s.instDir(id)}
+	if init != nil {
+		init(in)
+	}
 	for _, d := range []string{"rootfs", "upper", "work"} {
 		if err := os.MkdirAll(filepath.Join(in.dir, d), 0o755); err != nil {
 			return nil, err
@@ -717,6 +814,11 @@ func (s *Server) instantiate(name string, b *compose.Bundle) (*instance, error) 
 		return nil, fmt.Errorf("mount overlay: %w", err)
 	}
 	spec := *b.Spec
+	if len(extraEnv) > 0 {
+		proc := *spec.Process
+		proc.Env = append(append([]string(nil), proc.Env...), extraEnv...)
+		spec.Process = &proc
+	}
 	linux := *spec.Linux
 	linux.CgroupsPath = "/oar/" + id
 	spec.Linux = &linux
@@ -773,6 +875,7 @@ func (s *Server) stop(ctx context.Context, a proto.NameArgs) (*proto.Container, 
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	s.unroute(a.Name, in.ID)
 	st := s.observe(ctx, in)
 	if st.Status == "running" || st.Status == "created" || st.Status == "paused" {
 		if err := s.cfg.Runc.Kill(ctx, in.ID, "TERM"); err != nil && !strings.Contains(err.Error(), "not running") {
@@ -798,6 +901,7 @@ func (s *Server) delete(ctx context.Context, a proto.NameArgs) error {
 	if (st.Status == "running" || st.Status == "created") && !a.Force {
 		return fmt.Errorf("container %q is %s; stop it first or use --force", a.Name, st.Status)
 	}
+	s.unroute(a.Name, in.ID)
 	if err := s.destroy(ctx, in, true); err != nil {
 		return err
 	}
@@ -895,6 +999,7 @@ func (s *Server) StopAll(ctx context.Context) {
 	s.cleanups.Wait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeAllIngress()
 	list, _ := s.loadInstances()
 	for _, in := range list {
 		s.cfg.Runc.Kill(ctx, in.ID, "TERM")

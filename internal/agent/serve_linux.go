@@ -58,6 +58,7 @@ func Serve(ctx context.Context, ls []net.Listener, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	s.reconcileIngress(ctx)
 	if cfg.Mode == "vm" {
 		markBoot("agentReady")
 	}

@@ -75,7 +75,13 @@ func (b *Builder) buildBase(p spec.Platform, indexDigest string) (*BaseManifest,
 	ref := b.cfg.Runtime.Base
 	repo, _, _ := strings.Cut(ref, "@")
 	slug := baseSlug(repo)
-	dir := filepath.Join(b.opts.Artifacts, "bases", slug, p.Slug())
+	// one directory per pinned image (index digest), so re-pinning a tag
+	// never overwrites the rootfs older bundles still reference
+	_, idxHex, _ := strings.Cut(indexDigest, ":")
+	if len(idxHex) > 16 {
+		idxHex = idxHex[:16]
+	}
+	dir := filepath.Join(b.opts.Artifacts, "bases", slug, p.Slug(), idxHex)
 	mfPath := filepath.Join(dir, "manifest.json")
 
 	var cached BaseManifest
@@ -174,7 +180,7 @@ func (b *Builder) buildBase(p spec.Platform, indexDigest string) (*BaseManifest,
 			Digest:      dg.String(),
 			Key:         "sha256:" + hex.EncodeToString(h.Sum(nil)),
 			Size:        cw.n,
-			Path:        filepath.ToSlash(filepath.Join("bases", slug, p.Slug(), "rootfs.tar")),
+			Path:        filepath.ToSlash(filepath.Join("bases", slug, p.Slug(), idxHex, "rootfs.tar")),
 		},
 		Platform: p.String(),
 		Entries:  entries,

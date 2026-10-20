@@ -80,6 +80,16 @@ type Process struct {
 	Cwd     string            `yaml:"cwd"`
 	User    string            `yaml:"user"`
 	Ready   *Ready            `yaml:"ready"`
+	Ports   []Port            `yaml:"ports"`
+}
+
+// Port is a public port served by oar's ingress proxy. Each instance gets
+// its own private port, passed to the process in Env; switching instances
+// atomically moves the public port to the new instance.
+type Port struct {
+	Name string `yaml:"name"`
+	Port int    `yaml:"port"` // public port
+	Env  string `yaml:"env"`  // variable receiving the private port
 }
 
 // Ready is a readiness check. run/reload wait for it; reload only retires
@@ -200,6 +210,18 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Process.Command) == 0 {
 		return fmt.Errorf("process.command is required")
+	}
+	names, nums := map[string]bool{}, map[int]bool{}
+	for _, p := range c.Process.Ports {
+		switch {
+		case p.Name == "" || p.Env == "":
+			return fmt.Errorf("process.ports: name and env are required")
+		case p.Port < 1 || p.Port > 65535:
+			return fmt.Errorf("process.ports.%s: invalid port %d", p.Name, p.Port)
+		case names[p.Name] || nums[p.Port]:
+			return fmt.Errorf("process.ports: duplicate %s/%d", p.Name, p.Port)
+		}
+		names[p.Name], nums[p.Port] = true, true
 	}
 	if r := c.Process.Ready; r != nil {
 		n := 0

@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +27,10 @@ import (
 	"github.com/AkaraChen/open-agent-runtime/internal/vm"
 )
 
-const port = 18080
+const (
+	port        = 18080
+	ingressPort = 18081
+)
 
 type bench struct {
 	oar      string
@@ -51,6 +56,8 @@ func runMain(args []string) error {
 	oarBin := fs.String("oar", "bin/oar", "oar binary")
 	example := fs.String("example", "examples/agent-runtime", "example directory (config templates live here)")
 	arch := fs.String("arch", runtime.GOARCH, "guest architecture")
+	keep := fs.Bool("keep", false, "keep artifacts and configs (debugging)")
+	only := fs.String("only", "", "comma separated phases to run (debugging)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -77,7 +84,11 @@ func runMain(args []string) error {
 	if b.backend == "native" {
 		b.root = fmt.Sprintf("/var/lib/oar-bench-%d", rand.IntN(1<<30))
 	}
-	defer b.cleanup()
+	if !*keep {
+		defer b.cleanup()
+	} else {
+		defer logf("kept artifacts in %s, OAR_HOME %s", b.art, b.home)
+	}
 
 	start := time.Now()
 	steps := []struct {
@@ -96,6 +107,9 @@ func runMain(args []string) error {
 		{"vm-restart", b.phaseVMRestart},
 	}
 	for _, s := range steps {
+		if *only != "" && !strings.Contains(","+*only+",", ","+s.name+",") {
+			continue
+		}
 		logf("==> %s", s.name)
 		if err := s.fn(); err != nil {
 			b.res.Notes = append(b.res.Notes, fmt.Sprintf("phase %s failed: %v", s.name, err))
@@ -235,6 +249,7 @@ type cfgOpts struct {
 	env        map[string]string
 	ready      string // log readiness substring
 	readyTO    string
+	ingress    bool     // serve port 18081 through the ingress proxy
 	components []string // explicit component order (shuffle tests)
 }
 
@@ -275,6 +290,9 @@ process:
 			fmt.Fprintf(&sb, "    %s: %q\n", k, o.env[k])
 		}
 	}
+	if o.ingress {
+		fmt.Fprintf(&sb, "  ports:\n    - {name: http, port: %d, env: MY_AGENT_PORT}\n", ingressPort)
+	}
 	if o.ready != "" {
 		to := o.readyTO
 		if to == "" {
@@ -288,7 +306,9 @@ process:
 	return path
 }
 
-func (b *bench) writeProbeConfig() string {
+func (b *bench) writeProbeConfig() string { return b.writeProbeConfigFor("probe", port) }
+
+func (b *bench) writeProbeConfigFor(name string, target int) string {
 	content := fmt.Sprintf(`runtime:
   base: debian:trixie-slim
   platform: %s
@@ -326,8 +346,8 @@ sources:
             "changes": changes, "seconds": round(time.time() - t0, 1)}), flush=True)
 process:
   command: ["python3", "-u", "/opt/probe.py"]
-`, b.platform, port)
-	path := filepath.Join(b.exDir, ".bench-probe.yaml")
+`, b.platform, target)
+	path := filepath.Join(b.exDir, ".bench-"+name+".yaml")
 	os.WriteFile(path, []byte(content), 0o644)
 	b.configs = append(b.configs, path)
 	return path
@@ -490,6 +510,10 @@ func (b *bench) phaseBuild() error {
 		"slow-b":  {env: map[string]string{"VARIANT": "slow-b", "MY_AGENT_INIT_DELAY": "3s", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"},
 		"broken":  {env: map[string]string{"VARIANT": "broken", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "0"}, ready: "never printed", readyTO: "2s"},
 		"idle":    {env: map[string]string{"VARIANT": "idle"}},
+		"ing-a":   {env: map[string]string{"VARIANT": "ing-a"}, ingress: true},
+		"ing-b":   {extra: []string{"nix:jq"}, env: map[string]string{"VARIANT": "ing-b"}, ingress: true},
+		"slowi-a": {env: map[string]string{"VARIANT": "slowi-a", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true},
+		"slowi-b": {env: map[string]string{"VARIANT": "slowi-b", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true},
 	}
 	for name, o := range cfgs {
 		if _, _, err := b.build(name, b.writeConfig(name, o)); err != nil {
@@ -497,6 +521,9 @@ func (b *bench) phaseBuild() error {
 		}
 	}
 	if _, _, err := b.build("probe", b.writeProbeConfig()); err != nil {
+		return err
+	}
+	if _, _, err := b.build("probe-ing", b.writeProbeConfigFor("probe-ing", ingressPort)); err != nil {
 		return err
 	}
 	return nil
@@ -671,7 +698,7 @@ func (b *bench) phaseWarm() error {
 	if err == nil {
 		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB", wb.Uploaded, float64(wb.Bytes)/(1<<20))
 	}
-	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello"} {
+	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing"} {
 		if _, err := b.oarJSON(nil, "--bundle", b.digests[name], "warm"); err != nil {
 			return err
 		}
@@ -696,7 +723,7 @@ type runOut struct {
 		Container proto.Container `json:"container"`
 		Cached    bool            `json:"cached"`
 		Timings   struct {
-			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Total float64
+			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Total float64
 		} `json:"timings"`
 		Replaced string `json:"replaced"`
 	} `json:"result"`
@@ -886,7 +913,6 @@ func (b *bench) phaseRuntime() error {
 	} else {
 		b.fail(g, "net.dns", "容器内 DNS 解析", "解析失败")
 	}
-	b.na(g, "net.inbound", "宿主机 → 容器服务（端口转发）", "尚未实现（路线图 P1）")
 
 	// page cache sharing: read the same store path from two containers
 	// icu4c is in the closure but not touched by the workload above
@@ -1014,12 +1040,14 @@ func (b *bench) phaseDensity() error {
 
 // ---- phase 5: switch ----
 
-func (b *bench) probeSummary() (map[string]float64, error) {
-	if _, _, err := b.oarCmd("stop", "--name", "probe"); err != nil {
+func (b *bench) probeSummary() (map[string]float64, error) { return b.probeSummaryFor("probe") }
+
+func (b *bench) probeSummaryFor(name string) (map[string]float64, error) {
+	if _, _, err := b.oarCmd("stop", "--name", name); err != nil {
 		return nil, err
 	}
-	out, _, err := b.oarCmd("logs", "--name", "probe")
-	b.oarCmd("rm", "--name", "probe")
+	out, _, err := b.oarCmd("logs", "--name", name)
+	b.oarCmd("rm", "--name", name)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,6 +1130,10 @@ func (b *bench) phaseSwitch() error {
 		b.add(g, sc.key+".gap", sc.label+"：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
 	}
 
+	if err := b.ingressScenarios(n); err != nil {
+		return err
+	}
+
 	// rollback
 	if _, _, err := b.run("svc", b.digests["a-plain"]); err != nil {
 		return err
@@ -1174,6 +1206,122 @@ func (b *bench) phaseSwitch() error {
 		float64(s0.CacheBytes["instances"])/(1<<20), float64(s1.CacheBytes["instances"])/(1<<20))
 	b.rm("svc")
 	return nil
+}
+
+// ingressScenarios measures switching through oar's ingress proxy (no
+// SO_REUSEPORT), hot standby for slow-starting apps, and host access.
+func (b *bench) ingressScenarios(n int) error {
+	const g = "5-switch"
+	// 1. overlap switches through the ingress
+	if _, _, err := b.run("svc", b.digests["ing-a"]); err != nil {
+		return err
+	}
+	if _, _, err := b.run("probe-ing", b.digests["probe-ing"]); err != nil {
+		return err
+	}
+	time.Sleep(time.Second)
+	var wall, guest, drainT []float64
+	for i := 0; i < n; i++ {
+		target := "ing-b"
+		if i%2 == 1 {
+			target = "ing-a"
+		}
+		var r runOut
+		d, err := b.oarJSON(&r, "--bundle", b.digests[target], "reload", "--name", "svc")
+		if err != nil {
+			return err
+		}
+		wall = append(wall, ms(d))
+		guest = append(guest, r.Result.Timings.Total/1e6)
+		drainT = append(drainT, r.Result.Timings.Drain/1e6)
+		time.Sleep(300 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	sum, err := b.probeSummaryFor("probe-ing")
+	if err != nil {
+		return err
+	}
+	b.add(g, "ingress.wall", "入口代理切换：切换耗时（CLI 墙钟）", "ms", true, wall...)
+	b.add(g, "ingress.guest", "入口代理切换：切换耗时（guest 内）", "ms", true, guest...)
+	b.add(g, "ingress.drain", "入口代理切换：旧实例排空在途连接", "ms", true, drainT...)
+	total := sum["ok"] + sum["failed"]
+	b.add(g, "ingress.failed", fmt.Sprintf("入口代理切换：客户端失败请求（%d 次切换，无需 SO_REUSEPORT）", n), "个", true, sum["failed"]).Note =
+		fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
+	b.add(g, "ingress.gap", "入口代理切换：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
+
+	// 3. host -> container through the ingress (and the VM forwarder)
+	b.hostAccess()
+	b.rm("svc")
+
+	// 2. slow-starting app with a hot standby
+	if _, _, err := b.run("svc", b.digests["slowi-a"]); err != nil {
+		return err
+	}
+	var prep, sw []float64
+	for i := 0; i < 3; i++ {
+		target := "slowi-b"
+		if i%2 == 1 {
+			target = "slowi-a"
+		}
+		d, err := b.oarJSON(nil, "--bundle", b.digests[target], "prepare", "--name", "svc", "--start")
+		if err != nil {
+			return err
+		}
+		prep = append(prep, ms(d))
+		d, err = b.oarJSON(nil, "--bundle", b.digests[target], "reload", "--name", "svc")
+		if err != nil {
+			return err
+		}
+		sw = append(sw, ms(d))
+	}
+	b.add(g, "standby.switch", "慢启动应用（初始化 3 秒）+ 热备：切换耗时", "ms", true, sw...).Note =
+		fmt.Sprintf("热备准备（prepare --start，提前进行，不计入切换）p50 %.0f ms", median(prep))
+	b.rm("svc")
+	return nil
+}
+
+// hostAccess measures requests from the host to the ingress port.
+func (b *bench) hostAccess() {
+	const g = "6-runtime"
+	url := fmt.Sprintf("http://127.0.0.1:%d/", ingressPort)
+	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	var ok bool
+	for i := 0; i < 50; i++ { // the VM forwarder polls the guest for ports
+		if r, err := client.Get(url); err == nil {
+			r.Body.Close()
+			ok = true
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !ok {
+		b.fail(g, "host.latency", "宿主机 → 容器服务（入口代理）", "宿主机无法访问入口端口")
+		return
+	}
+	var lat []float64
+	for i := 0; i < 100; i++ {
+		t := time.Now()
+		r, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		lat = append(lat, ms(time.Since(t)))
+	}
+	b.add(g, "host.latency", "宿主机 → 容器服务：HTTP 请求延迟（每次新建连接）", "ms", true, lat...)
+	var tput []float64
+	for i := 0; i < 3; i++ {
+		t := time.Now()
+		r, err := client.Get(url + "blob?mib=64")
+		if err != nil {
+			continue
+		}
+		n, _ := io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		tput = append(tput, float64(n)/(1<<20)/time.Since(t).Seconds())
+	}
+	b.add(g, "host.tput", "宿主机 → 容器服务：下载吞吐（64 MiB）", "MiB/s", false, tput...)
 }
 
 func median(v []float64) float64 {
