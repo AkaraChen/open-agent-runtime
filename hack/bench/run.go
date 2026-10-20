@@ -205,11 +205,13 @@ func lastLines(s string, n int) string {
 
 func (b *bench) client() *proto.Client { return vm.Client(vm.Dir(b.home, "default")) }
 
-func (b *bench) stats() (proto.StatsResult, error) {
+func (b *bench) stats() (proto.StatsResult, error) { return b.statsOpt(false) }
+
+func (b *bench) statsOpt(drop bool) (proto.StatsResult, error) {
 	var st proto.StatsResult
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	err := b.client().Call(ctx, proto.OpStats, nil, &st)
+	err := b.client().Call(ctx, proto.OpStats, proto.StatsArgs{DropCaches: drop}, &st)
 	return st, err
 }
 
@@ -514,6 +516,12 @@ func (b *bench) phaseVM() error {
 		return err
 	}
 	b.add(g, "boot.cold", "虚拟机冷启动（含首次格式化数据盘）", "ms", true, ms(wall)).Note = "CLI 墙钟：vm start 到 agent 可用"
+	if vs, err := vm.ReadState(vm.Dir(b.home, "default")); err == nil && vs.Phases != nil {
+		ready := ms(vs.Phases["socketReady"])
+		b.add(g, "boot.cli", "　其中：CLI 拉起 supervisor 进程（含 daemonize）", "ms", true, math.Max(0, ms(wall)-ready))
+		b.add(g, "boot.machine", "　其中：后端创建并启动虚拟机（Boot 返回）", "ms", true, ms(vs.Phases["machineStarted"]))
+		b.add(g, "boot.reach", "　其中：虚拟机启动后到 agent 首次可达", "ms", true, ms(vs.Phases["agentReachable"]-vs.Phases["machineStarted"]))
+	}
 	st, err := b.stats()
 	if err != nil {
 		return err
@@ -884,7 +892,10 @@ func (b *bench) phaseRuntime() error {
 	// icu4c is in the closure but not touched by the workload above
 	readCmd := "find $(ls -d /nix/store/*-icu4c-78* | grep -v dev | head -1) -type f -exec cat {} + > /dev/null"
 	if b.backend != "native" {
-		s0, _ := b.stats()
+		s0, err := b.statsOpt(true)
+		if err != nil {
+			return err
+		}
 		b.exec("work", "sh", "-c", readCmd)
 		s1, _ := b.stats()
 		if _, _, err := b.run("work2", b.digests["idle"]); err == nil {

@@ -149,8 +149,11 @@ type State struct {
 	Started time.Time     `json:"started"`
 	Ready   bool          `json:"ready"`
 	Boot    time.Duration `json:"bootDuration"`
-	Config  MachineConfig `json:"config"`
-	Error   string        `json:"error,omitempty"`
+	// Phases are offsets from Started: machine booted by the backend, agent
+	// first reachable, host socket ready.
+	Phases map[string]time.Duration `json:"phases,omitempty"`
+	Config MachineConfig            `json:"config"`
+	Error  string                   `json:"error,omitempty"`
 }
 
 // ReadState loads the state of a VM.
@@ -213,7 +216,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		return err
 	}
 	fmt.Fprintf(log, "booting %s guest %q (%s, %d cpus, %d MiB)\n", b.Name(), cfg.Name, cfg.Arch, cfg.CPUs, cfg.MemoryMiB)
+	st.Phases = map[string]time.Duration{}
 	m, err := b.Boot(ctx, cfg)
+	st.Phases["machineStarted"] = time.Since(st.Started)
 	if err != nil {
 		return fail(fmt.Errorf("boot: %w", err))
 	}
@@ -244,6 +249,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		}
 	}
 	st.Boot = time.Since(st.Started)
+	st.Phases["agentReachable"] = st.Boot
 	fmt.Fprintf(log, "guest ready in %s: kernel %s, %s\n", st.Boot.Round(time.Millisecond), info.Kernel, info.Runc)
 
 	os.Remove(st.Socket)
@@ -255,6 +261,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	owner.chown(st.Socket)
 	os.Chmod(st.Socket, 0o600)
 	st.Ready = true
+	st.Phases["socketReady"] = time.Since(st.Started)
 	if err := writeState(cfg.Dir, st, owner); err != nil {
 		m.Kill()
 		return err

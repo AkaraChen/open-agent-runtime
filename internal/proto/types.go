@@ -41,6 +41,13 @@ type WarmPutResult struct {
 	Duration time.Duration `json:"duration"`
 }
 
+// StatsArgs tunes a stats request.
+type StatsArgs struct {
+	// DropCaches drops the guest page cache first (vm mode only), so cache
+	// growth can be measured.
+	DropCaches bool `json:"dropCaches,omitempty"`
+}
+
 // StatsResult is a snapshot of guest resource usage, for benchmarks and
 // leak detection.
 type StatsResult struct {

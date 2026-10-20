@@ -187,6 +187,19 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		return proto.ExecResult{ExitCode: code, Stdout: out, Stderr: errOut}, nil
 	case proto.OpStats:
+		var a proto.StatsArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		if a.DropCaches {
+			if s.cfg.Mode != "vm" {
+				return nil, fmt.Errorf("dropping caches is only allowed inside the guest VM")
+			}
+			unix.Sync()
+			if err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("3"), 0); err != nil {
+				return nil, err
+			}
+		}
 		return s.stats(), nil
 	case proto.OpShutdown:
 		if s.cfg.Shutdown == nil {
