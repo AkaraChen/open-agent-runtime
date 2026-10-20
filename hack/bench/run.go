@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -83,6 +84,7 @@ func runMain(args []string) error {
 		name string
 		fn   func() error
 	}{
+		{"env", b.phaseEnv},
 		{"build", b.phaseBuild},
 		{"vm", b.phaseVM},
 		{"warm", b.phaseWarm},
@@ -369,6 +371,44 @@ func (b *bench) cleanup() {
 	if b.root != "" {
 		exec.Command("sudo", "rm", "-rf", b.root).Run()
 	}
+}
+
+// ---- phase 0: environment calibration ----
+
+// phaseEnv measures the host itself so that runner-to-runner variance can
+// be told apart from changes in oar.
+func (b *bench) phaseEnv() error {
+	const g = "0-env"
+	var fork []float64
+	for i := 0; i < 50; i++ {
+		t := time.Now()
+		if err := exec.Command("true").Run(); err != nil {
+			return err
+		}
+		fork = append(fork, ms(time.Since(t)))
+	}
+	b.add(g, "fork", "宿主机 fork+exec 延迟（true）", "ms", true, fork...)
+	var cpu []float64
+	buf := make([]byte, 64<<20)
+	for i := 0; i < 3; i++ {
+		t := time.Now()
+		sha256.Sum256(buf)
+		cpu = append(cpu, ms(time.Since(t)))
+	}
+	b.add(g, "cpu", "宿主机单核 CPU（sha256 64 MiB）", "ms", true, cpu...)
+	f, err := os.CreateTemp(b.art, "disk-")
+	if err == nil {
+		t := time.Now()
+		for i := 0; i < 4; i++ {
+			f.Write(buf)
+		}
+		f.Sync()
+		d := time.Since(t)
+		f.Close()
+		os.Remove(f.Name())
+		b.add(g, "disk", "宿主机磁盘顺序写（256 MiB + fsync）", "MiB/s", false, 256/d.Seconds())
+	}
+	return nil
 }
 
 // ---- phase 1: build ----

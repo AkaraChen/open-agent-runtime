@@ -260,13 +260,14 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		return err
 	}
 
+	pool := newConnPool(ctx, m, 4)
 	go func() {
 		for {
 			c, err := l.Accept()
 			if err != nil {
 				return
 			}
-			go proxy(ctx, c, m)
+			go proxy(ctx, c, pool)
 		}
 	}()
 
@@ -295,9 +296,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	return nil
 }
 
-func proxy(ctx context.Context, c net.Conn, m Machine) {
+func proxy(ctx context.Context, c net.Conn, pool *connPool) {
 	defer c.Close()
-	g, err := m.DialAgent(ctx)
+	g, err := pool.get(ctx)
 	if err != nil {
 		return
 	}

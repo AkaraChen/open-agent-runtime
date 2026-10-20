@@ -188,9 +188,19 @@ func mountData() {
 		}
 	}
 	if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
-		logInit("mount %s: %v; using tmpfs", dev, err)
-		unix.Mount("tmpfs", GuestRoot, "tmpfs", 0, "mode=0755")
-		return
+		// The disk only holds a rebuildable cache: repair it, and if that
+		// fails start over with a fresh filesystem.
+		logInit("mount %s: %v; running e2fsck", dev, err)
+		exec.Command("e2fsck", "-p", "-f", dev).Run()
+		if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
+			logInit("still unmountable (%v); reformatting the cache disk", err)
+			exec.Command("mkfs.ext4", "-q", "-F", "-L", "oar-data", "-E", "lazy_itable_init=1,lazy_journal_init=1", dev).Run()
+			if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
+				logInit("mount %s: %v; using tmpfs", dev, err)
+				unix.Mount("tmpfs", GuestRoot, "tmpfs", 0, "mode=0755")
+				return
+			}
+		}
 	}
 	logInit("data disk %s mounted at %s", dev, GuestRoot)
 }

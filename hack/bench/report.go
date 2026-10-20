@@ -12,6 +12,7 @@ import (
 )
 
 var groupTitles = map[string]string{
+	"0-env":         "0. 环境基准（判断 runner 噪声用，与 oar 无关）",
 	"1-build":       "1. 构建",
 	"2-warm":        "2. 分发与预热",
 	"3-vm":          "3. 虚拟机层",

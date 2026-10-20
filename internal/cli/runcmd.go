@@ -129,6 +129,13 @@ type warmStats struct {
 
 // warm uploads missing artifacts into the guest cache.
 func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
+	return s.warmOpt(ctx, verbose, false)
+}
+
+// warmOpt uploads missing artifacts; with precompose it also builds the
+// bundle template and store view (run/reload compose anyway, so they skip
+// the extra round trip).
+func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmStats, error) {
 	start := time.Now()
 	items, paths := warmItems(s.art, s.lock)
 	var st proto.WarmStatusResult
@@ -137,7 +144,10 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	}
 	stats := &warmStats{Total: len(items), Uploaded: len(st.Missing)}
 	if len(st.Missing) == 0 {
-		err := s.precompose(ctx)
+		var err error
+		if precompose {
+			err = s.precompose(ctx)
+		}
 		stats.Duration = time.Since(start)
 		return stats, err
 	}
@@ -186,8 +196,10 @@ func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
-	if err := s.precompose(ctx); err != nil {
-		return nil, err
+	if precompose {
+		if err := s.precompose(ctx); err != nil {
+			return nil, err
+		}
 	}
 	stats.Bytes = sent.Load()
 	stats.Files = files.Load()
@@ -267,7 +279,7 @@ func warmCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := s.warm(cmd.Context(), !g.jsonOut)
+			st, err := s.warmOpt(cmd.Context(), !g.jsonOut, true)
 			if err != nil {
 				return err
 			}

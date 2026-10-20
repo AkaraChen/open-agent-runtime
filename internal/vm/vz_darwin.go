@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -69,7 +70,17 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	if err := EnsureDisk(disk, cfg.DiskGiB); err != nil {
 		return nil, err
 	}
-	diskAtt, err := vz.NewDiskImageStorageDeviceAttachment(disk, false)
+	// The data disk is a rebuildable cache: guest flushes become fsync
+	// instead of F_FULLFSYNC (VZ's default "full" mode), which is an order of
+	// magnitude faster on macOS. OAR_VZ_DISK_SYNC=full|fsync|none overrides.
+	sync := vz.DiskImageSynchronizationModeFsync
+	switch os.Getenv("OAR_VZ_DISK_SYNC") {
+	case "full":
+		sync = vz.DiskImageSynchronizationModeFull
+	case "none":
+		sync = vz.DiskImageSynchronizationModeNone
+	}
+	diskAtt, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(disk, false, vz.DiskImageCachingModeCached, sync)
 	if err != nil {
 		return nil, fmt.Errorf("disk: %w", err)
 	}

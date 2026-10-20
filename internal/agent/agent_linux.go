@@ -54,7 +54,10 @@ type Server struct {
 	// cleanups tracks background removal of retired instances
 	cleanups sync.WaitGroup
 	views    storeViews
-	warmMu   sync.Map // per-key locks for warm.put
+
+	runcVerOnce sync.Once
+	runcVer     string
+	warmMu      sync.Map // per-key locks for warm.put
 }
 
 // New prepares the state directories.
@@ -78,6 +81,13 @@ func New(cfg Config) (*Server, error) {
 		os.RemoveAll(filepath.Join(s.layout.Tmp(), e.Name()))
 	}
 	return s, nil
+}
+
+// runcVersion is computed once: exec'ing runc on every info call costs
+// tens of milliseconds in slow guests, and every CLI command calls info.
+func (s *Server) runcVersion() string {
+	s.runcVerOnce.Do(func() { s.runcVer = s.cfg.Runc.Version() })
+	return s.runcVer
 }
 
 // Handle dispatches a request and logs failures to the agent's stderr
@@ -199,7 +209,7 @@ func (s *Server) info() proto.InfoResult {
 		Kernel:       unix.ByteSliceToString(u.Release[:]),
 		Root:         s.cfg.Root,
 		Mode:         s.cfg.Mode,
-		Runc:         s.cfg.Runc.Version(),
+		Runc:         s.runcVersion(),
 		BootedAt:     s.booted.Format(time.RFC3339),
 		Containers:   len(list),
 	}
