@@ -59,6 +59,8 @@ type Server struct {
 	runcVerOnce sync.Once
 	runcVer     string
 	warmMu      sync.Map // per-key locks for warm.put
+	// privateBind is set when New bind-mounted Root onto itself
+	privateBind bool
 }
 
 // New prepares the state directories.
@@ -79,6 +81,7 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
+	s.privateBind = makePrivate(cfg.Root)
 	// leftovers from interrupted transfers
 	entries, _ := os.ReadDir(s.layout.Tmp())
 	for _, e := range entries {
@@ -1026,6 +1029,9 @@ func (s *Server) StopAll(ctx context.Context) {
 	}
 	s.cleanups.Wait()
 	s.unmountAllStoreViews()
+	if s.privateBind {
+		unix.Unmount(s.cfg.Root, unix.MNT_DETACH)
+	}
 }
 
 // SetShutdown installs the shutdown hook.

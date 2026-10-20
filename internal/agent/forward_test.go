@@ -178,6 +178,9 @@ func newAgent(tb testing.TB) *agent.Server {
 	if err != nil {
 		tb.Fatal(err)
 	}
+	// as root, New bind-mounts dir; StopAll releases it before TempDir
+	// cleanup removes the directory
+	tb.Cleanup(func() { s.StopAll(context.Background()) })
 	return s
 }
 
