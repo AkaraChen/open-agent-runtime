@@ -57,6 +57,7 @@ func RunInit() {
 		}
 	}
 	enableControllers()
+	limitDirtyPages()
 	markBoot("mounts")
 	unix.Sethostname([]byte("oar-guest"))
 	ifUp("lo")
@@ -203,6 +204,23 @@ func mountData() {
 		}
 	}
 	logInit("data disk %s mounted at %s", dev, GuestRoot)
+}
+
+// limitDirtyPages starts writeback early and caps unwritten data. The
+// kernel defaults scale with memory (10%/20%), so warming an image leaves
+// hundreds of MiB dirty in a 4 GiB guest; the ext4 journal commit that
+// follows must write all of it out, and file system operations of the next
+// container start (runc create) wait for that commit: first starts right
+// after a warm took 0.6-3 s instead of 50-450 ms in the benchmarks.
+func limitDirtyPages() {
+	for k, v := range map[string]string{
+		"/proc/sys/vm/dirty_background_bytes": fmt.Sprint(32 << 20),
+		"/proc/sys/vm/dirty_bytes":            fmt.Sprint(256 << 20),
+	} {
+		if err := os.WriteFile(k, []byte(v), 0); err != nil {
+			logInit("%s: %v", k, err)
+		}
+	}
 }
 
 func hasExt4(dev string) bool {
