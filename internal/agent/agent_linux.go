@@ -70,6 +70,9 @@ func New(cfg Config) (*Server, error) {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
 	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
+	// a fresh version after a restart, so a waiting host never mistakes
+	// the new list for the one it already has
+	s.ing.ver = uint64(s.booted.UnixNano())
 	for _, d := range []string{cfg.Root, s.layout.Tmp(), s.layout.InstancesDir(), s.layout.StoreRoot(), cfg.Runc.Root,
 		filepath.Join(cfg.Root, "bases"), filepath.Join(cfg.Root, "components"), filepath.Join(cfg.Root, "bundles")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -144,7 +147,11 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		return nil, s.handleDial(a, rs)
 	case proto.OpIngress:
-		return s.ingressList(), nil
+		var a proto.IngressListArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return s.ingressWait(ctx, a), nil
 	case proto.OpPrepare:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
+	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
 // echoServer answers every line with "<name>\n".
@@ -102,5 +103,42 @@ func TestIngressSwitchAndDrain(t *testing.T) {
 	s.unroute("svc", "svc-b")
 	if _, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
 		t.Fatal("public port still open after unroute")
+	}
+}
+
+func TestIngressListLongPoll(t *testing.T) {
+	s := &Server{cfg: Config{Mode: "native"}}
+	defer s.closeAllIngress()
+	v0 := s.ingressList().Version
+	// a stale version answers at once
+	if l := s.ingressWait(context.Background(), proto.IngressListArgs{Version: v0 + 1, Wait: time.Minute}); l.Version != v0 {
+		t.Fatalf("version %d, want %d", l.Version, v0)
+	}
+	// the current version waits until the list changes
+	got := make(chan proto.IngressList)
+	go func() { got <- s.ingressWait(context.Background(), proto.IngressListArgs{Version: v0, Wait: time.Minute}) }()
+	select {
+	case <-got:
+		t.Fatal("returned before a change")
+	case <-time.After(50 * time.Millisecond):
+	}
+	pub := freePort(t)
+	in := &instance{Name: "svc", ID: "svc-a", Ports: map[string]int{"http": echoServer(t, "a")}, PublicPorts: []manifest.Port{{Name: "http", Port: pub}}}
+	if _, err := s.route(in); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case l := <-got:
+		if l.Version == v0 || len(l.Ingresses) != 1 || l.Ingresses[0].Port != pub {
+			t.Fatalf("got %+v", l)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("not woken by route")
+	}
+	// and gives up after Wait
+	start := time.Now()
+	s.ingressWait(context.Background(), proto.IngressListArgs{Version: s.ingressList().Version, Wait: 30 * time.Millisecond})
+	if d := time.Since(start); d < 30*time.Millisecond || d > time.Second {
+		t.Fatalf("waited %s", d)
 	}
 }

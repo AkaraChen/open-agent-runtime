@@ -269,7 +269,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 
 	pool := newConnPool(ctx, m, 4)
 	if b.NeedsGuestImage() {
-		go forwardIngress(ctx, &proto.Client{Dial: pool.get}, log)
+		go ForwardIngress(ctx, &proto.Client{Dial: pool.get}, "127.0.0.1", log)
 	}
 	go func() {
 		for {
@@ -312,19 +312,7 @@ func proxy(ctx context.Context, c net.Conn, pool *connPool) {
 	if err != nil {
 		return
 	}
-	defer g.Close()
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(g, c); closeWrite(g); done <- struct{}{} }()
-	go func() { io.Copy(c, g); closeWrite(c); done <- struct{}{} }()
-	<-done
-	<-done
-}
-
-func closeWrite(c net.Conn) {
-	type cw interface{ CloseWrite() error }
-	if x, ok := c.(cw); ok {
-		x.CloseWrite()
-	}
+	proto.Pipe(c, g)
 }
 
 // ErrUnsupported is returned by backends that exist only as extension points.

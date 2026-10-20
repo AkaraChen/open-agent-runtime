@@ -158,8 +158,17 @@ type Ingress struct {
 	Active    int64  `json:"active"`
 }
 
-// IngressList lists ingress ports.
+// IngressListArgs turns ingress.list into a long poll: when the agent's
+// list is still at Version, it answers once the list changes or after Wait.
+type IngressListArgs struct {
+	Version uint64        `json:"version,omitempty"`
+	Wait    time.Duration `json:"wait,omitempty"`
+}
+
+// IngressList lists ingress ports. Version changes whenever the list may
+// have changed (0 from agents without long polling).
 type IngressList struct {
+	Version   uint64    `json:"version"`
 	Ingresses []Ingress `json:"ingresses"`
 }
 

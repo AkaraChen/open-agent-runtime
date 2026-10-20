@@ -9,6 +9,8 @@ import (
 	"syscall"
 
 	"github.com/mdlayher/vsock"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
 func vsockAvailable() bool {
@@ -23,7 +25,14 @@ func vsockAvailable() bool {
 	return true
 }
 
-func dialVsock(cid, port uint32) (net.Conn, error) { return vsock.Dial(cid, port, nil) }
+func dialVsock(cid, port uint32) (net.Conn, error) {
+	c, err := vsock.Dial(cid, port, nil)
+	if err != nil {
+		return nil, err
+	}
+	proto.TuneVsock(c)
+	return c, nil
+}
 
 func setDeathSignal(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
