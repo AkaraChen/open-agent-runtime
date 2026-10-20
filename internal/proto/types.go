@@ -59,9 +59,11 @@ type StatsResult struct {
 	Cgroups      int              `json:"cgroups"`
 	MemTotal     int64            `json:"memTotal"`
 	MemAvailable int64            `json:"memAvailable"`
-	Cached       int64            `json:"cached"`
-	Uptime       float64          `json:"uptime"`
-	Load1        float64          `json:"load1"`
+	Dirty        int64            `json:"dirty"` // dirty + writeback page cache
+
+	Cached int64   `json:"cached"`
+	Uptime float64 `json:"uptime"`
+	Load1  float64 `json:"load1"`
 	// Boot holds guest uptimes (seconds) at boot milestones (vm mode).
 	Boot map[string]float64 `json:"boot,omitempty"`
 }

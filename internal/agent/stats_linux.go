@@ -100,6 +100,8 @@ func (s *Server) stats() proto.StatsResult {
 				res.MemTotal = v << 10
 			case "MemAvailable:":
 				res.MemAvailable = v << 10
+			case "Dirty:", "Writeback:":
+				res.Dirty += v << 10
 			case "Cached:":
 				res.Cached = v << 10
 			}

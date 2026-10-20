@@ -192,7 +192,7 @@ func (m *qemuMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 		return r.c, r.err
 	case <-ctx.Done():
 		go func() {
-			if r := <-ch; r.c != nil {
+			if r := <-ch; r.err == nil && r.c != nil {
 				r.c.Close()
 			}
 		}()

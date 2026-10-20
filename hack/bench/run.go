@@ -899,6 +899,10 @@ print(json.dumps(res))
 
 func (b *bench) phaseRuntime() error {
 	const g = "6-runtime"
+	// pending writeback competes with the workload on slow disks
+	if st, err := b.stats(); err == nil {
+		b.add(g, "dirty", "开始时待写回的数据（Dirty + Writeback）", "MiB", true, float64(st.Dirty)/(1<<20))
+	}
 	if _, _, err := b.run("work", b.digests["idle"]); err != nil {
 		return err
 	}
