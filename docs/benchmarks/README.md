@@ -10,6 +10,7 @@
 | 3 | [入口代理与热备](03-ingress-standby/README.md) | 私有端口 + 入口代理、`prepare --start` 热备、宿主机端口转发、产物按内容寻址 |
 | 4 | [应用快照](04-snapshots/README.md) | CRIU 快照与恢复（`process.snapshot`）、guest switch_root（pivot_root）、CRIU 进 guest 镜像 |
 | 5 | [store 视图改为硬链接树](05-store-views/README.md) | issue #2 的根因：视图挂载不再常驻 agent 命名空间；按闭包缓存视图（vz 回归待查） |
+| 6 | [VM 冷启动](06-vm-boot/README.md) | 启动阶段拆分、amd64 改用 microvm、LZ4 内核与 initramfs、switch_root 不复制、去掉固定等待 |
 
 复现方法：
 

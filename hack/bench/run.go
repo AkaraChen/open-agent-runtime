@@ -570,7 +570,7 @@ func (b *bench) phaseVM() error {
 		b.add(g, "boot.guest", "　其中：guest 内核 + init 到 agent 就绪", "ms", true, t*1000)
 		b.add(g, "boot.vmm", "　其中：VMM/宿主侧开销（总时间 − guest 时间）", "ms", true, math.Max(0, ms(wall)-t*1000))
 		if k, ok := st.Boot["kernel"]; ok {
-			b.add(g, "boot.kernel", "　其中：guest 内核启动（解压内核与 initramfs 到运行 init）", "ms", true, k*1000)
+			b.add(g, "boot.kernel", "　其中：guest 内核启动（内核时钟开始到运行 init，含解压 initramfs）", "ms", true, k*1000)
 			if sr, ok := st.Boot["switchRoot"]; ok {
 				b.add(g, "boot.switchroot", "　其中：switch_root（离开 initramfs）", "ms", true, (sr-k)*1000)
 			}
