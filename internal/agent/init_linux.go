@@ -35,6 +35,9 @@ func RunInit() {
 		unix.Dup2(int(console.Fd()), 2)
 	}
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	// leave the initramfs so that pivot_root works (runc, CRIU restore)
+	switchRoot()
+	pivot := os.Getenv("OAR_SWITCHED_ROOT") == "1"
 	logInit("booting guest (agent %s)", Version)
 	mounts := []struct {
 		src, dst, typ string
@@ -85,7 +88,10 @@ func RunInit() {
 			Env:   append(os.Environ(), "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
 		}
 		argv := []string{"oar-agent", "serve", "--mode", "vm",
-			"--listen", fmt.Sprintf("vsock:%d", AgentPort), "--root", GuestRoot, "--no-pivot"}
+			"--listen", fmt.Sprintf("vsock:%d", AgentPort), "--root", GuestRoot}
+		if !pivot {
+			argv = append(argv, "--no-pivot")
+		}
 		if port := cmdlineParam("oar.tcp"); port != "" {
 			argv = append(argv, "--listen", "tcp:0.0.0.0:"+port)
 		}

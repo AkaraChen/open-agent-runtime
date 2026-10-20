@@ -123,6 +123,10 @@ type Timings struct {
 	Create      time.Duration `json:"create"`
 	Start       time.Duration `json:"start"`
 	Ready       time.Duration `json:"ready,omitempty"`
+	// Snapshot is the time spent checkpointing (first ready instance) and
+	// Restore the time to restore from a snapshot instead of starting.
+	Snapshot time.Duration `json:"snapshot,omitempty"`
+	Restore  time.Duration `json:"restore,omitempty"`
 	// Drain is how long the old instance kept serving in-flight connections
 	// after the ingress switched to the new one.
 	Drain   time.Duration `json:"drain,omitempty"`
@@ -138,9 +142,13 @@ type RunResult struct {
 	Cached    bool      `json:"cached"`
 	Strategy  string    `json:"strategy,omitempty"`
 	// Prepared is true when a pre-created instance was used.
-	Prepared bool    `json:"prepared,omitempty"`
-	Timings  Timings `json:"timings"`
-	Replaced string  `json:"replaced,omitempty"`
+	Prepared bool `json:"prepared,omitempty"`
+	// Restored is true when the instance was restored from a snapshot.
+	Restored      bool    `json:"restored,omitempty"`
+	SnapshotBytes int64   `json:"snapshotBytes,omitempty"`
+	SnapshotNote  string  `json:"snapshotNote,omitempty"`
+	Timings       Timings `json:"timings"`
+	Replaced      string  `json:"replaced,omitempty"`
 }
 
 // DialArgs opens a stream to a TCP port inside the guest network.

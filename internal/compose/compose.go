@@ -49,6 +49,14 @@ func (l Layout) BundleDir(digest string) string {
 	return filepath.Join(l.Root, "bundles", hexOf(digest))
 }
 
+// CriuConfig is the CRIU configuration file used for this cache.
+func (l Layout) CriuConfig() string { return filepath.Join(l.Root, "criu.conf") }
+
+// SnapshotDir holds a bundle's checkpoint.
+func (l Layout) SnapshotDir(digest string) string {
+	return filepath.Join(l.BundleDir(digest), "snapshot")
+}
+
 // StoreView is the per-bundle /nix/store skeleton (empty mountpoints).
 func (l Layout) StoreView(digest string) string { return filepath.Join(l.BundleDir(digest), "store") }
 
@@ -60,7 +68,10 @@ func (l Layout) Tmp() string { return filepath.Join(l.Root, "tmp") }
 
 // templateFormat is bumped whenever Spec or Layers change shape.
 // 4: /nix/store is a per-bundle view of the closure, bound with one rbind.
-const templateFormat = 4
+// 5: private mount propagation (checkpoint/restore).
+// 6: CRIU configuration annotation.
+// 7: rootfs propagation moved to instantiation (depends on pivot_root).
+const templateFormat = 7
 
 // Bundle is a cached, composed bundle template.
 type Bundle struct {
@@ -263,7 +274,10 @@ func Spec(l Layout, pl *manifest.PlatformLock) *specs.Spec {
 	s := &specs.Spec{
 		Version:  specs.Version,
 		Hostname: pl.Hostname,
-		Root:     &specs.Root{Path: "rootfs"},
+		// runc hands this file to CRIU on checkpoint/restore instead of the
+		// host-wide /etc/criu/runc.conf
+		Annotations: map[string]string{"org.criu.config": l.CriuConfig()},
+		Root:        &specs.Root{Path: "rootfs"},
 		Process: &specs.Process{
 			Args: pl.Process.Args,
 			Env:  pl.Process.Env,

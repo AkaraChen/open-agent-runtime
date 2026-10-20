@@ -543,6 +543,7 @@ func (b *Builder) resolveProcess(pl *manifest.PlatformLock, base *BaseManifest) 
 	for _, p := range pc.Ports {
 		pl.Ports = append(pl.Ports, manifest.Port{Name: p.Name, Port: p.Port, Env: p.Env})
 	}
+	pl.Snapshot = pc.Snapshot
 	return nil
 }
 

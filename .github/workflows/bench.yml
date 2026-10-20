@@ -67,6 +67,9 @@ jobs:
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           sudo modprobe vhost_vsock && sudo chmod 666 /dev/vhost-vsock
           sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - if: matrix.backend == 'native'
+        name: install criu (application snapshots)
+        run: sudo apt-get update -q && (sudo apt-get install -y -q criu || echo "criu not available; snapshot metrics will be n/a")
       - if: matrix.backend == 'qemu'
         run: brew install qemu
       - uses: dtolnay/rust-toolchain@stable

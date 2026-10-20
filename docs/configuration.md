@@ -88,6 +88,8 @@ Defines where `binary:`, `file:` and `dir:` components come from.
 | `env` | Environment variables. These take precedence over component and base values. |
 | `cwd` | Working directory (default `/`). |
 | `user` | Numeric `uid[:gid]` (default `0:0`). |
+| `ports` | Ingress ports: `- {name: http, port: 8080, env: PORT}`. Each instance listens on a private port passed in `env`; oar serves the public `port` and switches it atomically between instances. It is not part of the bundle digest. |
+| `snapshot` | `true` checkpoints the first ready instance of a bundle (CRIU) and restores later instances from it, skipping application start-up. It requires `criu` on native hosts (bundled in the guest image), and falls back to a normal start when unavailable. It is not part of the bundle digest. |
 | `ready` | Readiness check used by `run` and `reload`. Set exactly one of `tcp: host:port`, `exec: [cmd, ...]` (exit status 0) or `log: "substring"` (container output). `timeout` defaults to 30s. It is not part of the bundle digest. |
 
 When a service binds with `SO_REUSEPORT`, prefer a `log` or `exec` check. During an overlapping

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -42,33 +43,100 @@ func (r *Runc) run(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// Create runs `runc create`; the container's stdio is the log file.
-func (r *Runc) Create(ctx context.Context, id, bundle string, log *os.File) error {
+// Create runs `runc create`. With pipes the container's stdio are pipes
+// feeding a log relay process: pipes (unlike a host file) can be
+// checkpointed and re-attached by CRIU, so snapshot-enabled bundles need
+// them. Otherwise the container writes the log file directly, which avoids
+// spawning a relay per container.
+func (r *Runc) Create(ctx context.Context, id, bundle, logPath string, pipes bool) error {
 	args := []string{"create", "--bundle", bundle, "--pid-file", bundle + "/pid"}
 	if r.NoPivot {
 		args = append(args, "--no-pivot")
 	}
 	args = append(args, id)
-	c := r.cmd(ctx, args...)
+	if pipes {
+		return r.withStdio(ctx, logPath, args)
+	}
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
 	devnull, err := os.Open(os.DevNull)
 	if err != nil {
 		return err
 	}
 	defer devnull.Close()
-	c.Stdin = devnull
-	c.Stdout = log
-	var stderr bytes.Buffer
-	// runc reports its own errors on stderr; the container inherits the
-	// same fd, so tee setup errors through a buffer only on failure.
-	c.Stderr = log
+	c := r.cmd(ctx, args...)
+	c.Stdin, c.Stdout, c.Stderr = devnull, log, log
 	off, _ := log.Seek(0, 2)
 	if err := c.Run(); err != nil {
 		tail := make([]byte, 4096)
 		n, _ := log.ReadAt(tail, off)
-		stderr.Write(tail[:n])
-		return fmt.Errorf("runc create: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("runc create: %w: %s", err, strings.TrimSpace(string(tail[:n])))
 	}
 	return nil
+}
+
+// withStdio runs a runc command whose container process inherits pipe
+// stdio connected to a log relay.
+func (r *Runc) withStdio(ctx context.Context, logPath string, args []string) error {
+	return r.withStdioEnv(ctx, logPath, args, nil)
+}
+
+func (r *Runc) withStdioEnv(ctx context.Context, logPath string, args, env []string) error {
+	out, err := startLogRelay(logPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	inW.Close() // stdin reads EOF
+	defer inR.Close()
+	c := r.cmd(ctx, args...)
+	if len(env) > 0 {
+		c.Env = append(os.Environ(), env...)
+	}
+	c.Stdin, c.Stdout, c.Stderr = inR, out, out
+	if err := c.Run(); err != nil {
+		// runc reports its own errors on the same stderr; give the relay a
+		// moment to write them, then quote the tail of the log
+		time.Sleep(50 * time.Millisecond)
+		tail, _ := os.ReadFile(logPath)
+		if len(tail) > 4096 {
+			tail = tail[len(tail)-4096:]
+		}
+		return fmt.Errorf("runc %s: %w: %s", args[0], err, strings.TrimSpace(string(tail)))
+	}
+	return nil
+}
+
+// startLogRelay starts `cat >> logPath` reading from a pipe and returns the
+// pipe's write end.
+func startLogRelay(logPath string) (*os.File, error) {
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	defer logf.Close()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	relay := exec.Command("cat")
+	relay.Stdin, relay.Stdout = pr, logf
+	relay.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := relay.Start(); err != nil {
+		pr.Close()
+		pw.Close()
+		return nil, fmt.Errorf("start log relay: %w", err)
+	}
+	pr.Close()
+	go relay.Wait()
+	return pw, nil
 }
 
 // Start runs `runc start`.

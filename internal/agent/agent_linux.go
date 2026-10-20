@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -75,6 +76,9 @@ func New(cfg Config) (*Server, error) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.writeCriuConfig(); err != nil {
+		return nil, err
 	}
 	// leftovers from interrupted transfers
 	entries, _ := os.ReadDir(s.layout.Tmp())
@@ -449,7 +453,6 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	t0 := time.Now()
 	unlock := s.lockName(a.Name)
 	defer unlock()
-	var err error
 	old, _ := s.current(a.Name)
 	if old != nil && !reload {
 		st := s.observe(ctx, old)
@@ -466,11 +469,22 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	var in *instance
 	var cached, prepared bool
 	var tCompose, tInst time.Time
+	var restoreDur time.Duration
+	var restored bool
+	var restoreErr string
 	if p := s.takePrepared(ctx, a.Name, a.Lock.BundleDigest); p != nil {
 		in, cached, prepared = p, true, true
 		tCompose = time.Now()
 		tInst = tCompose
+	} else if r, d, err := s.tryRestore(ctx, a); r != nil {
+		in, cached, restored, prepared = r, true, true, true
+		tCompose = time.Now()
+		tInst = tCompose
+		restoreDur = d
 	} else {
+		if err != nil {
+			restoreErr = err.Error()
+		}
 		in, cached, tCompose, tInst, err = s.createInstance(ctx, a.Name, a)
 		if err != nil {
 			return nil, err
@@ -478,9 +492,11 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 	}
 	tCreate := time.Now()
 	result := &proto.RunResult{
-		Cached:   cached,
-		Prepared: prepared,
-		Strategy: a.Strategy,
+		Cached:       cached,
+		Prepared:     prepared && !restored,
+		Restored:     restored,
+		SnapshotNote: restoreErr,
+		Strategy:     a.Strategy,
 		Timings: proto.Timings{
 			Compose:     tCompose.Sub(t0),
 			Instantiate: tInst.Sub(tCompose),
@@ -500,14 +516,19 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 			s.cfg.Runc.WaitStopped(ctx, old.ID, 5*time.Second)
 		}
 	}
+	result.Timings.Restore = restoreDur
 	standby := prepared && in.Started
 	ready := func() error {
-		if standby {
+		if standby && !restored {
 			return nil // a hot standby is already running and ready
 		}
 		tR := time.Now()
 		err := s.waitReady(ctx, in, readyCheck(a.Lock, in))
 		result.Timings.Ready = time.Since(tR)
+		if err == nil && !restored {
+			// first ready instance of a snapshot-enabled bundle
+			s.takeSnapshot(ctx, in, a.Lock, result)
+		}
 		return err
 	}
 	startNew := func() error {
@@ -623,6 +644,7 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	for _, p := range a.Lock.Ports {
 		env = append(env, fmt.Sprintf("%s=%d", p.Env, ports[p.Name]))
 	}
+	env = append(env, snapshotEnv(a.Lock)...)
 	in, err := s.instantiate(name, res.Bundle, env, func(in *instance) {
 		in.Ports, in.PublicPorts = ports, a.Lock.Ports
 	})
@@ -630,17 +652,42 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 		return nil, false, tCompose, time.Time{}, err
 	}
 	tInst := time.Now()
-	logf, err := os.OpenFile(filepath.Join(in.dir, "console.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
-		s.destroy(ctx, in, true)
-		return nil, false, tCompose, tInst, err
-	}
-	defer logf.Close()
-	if err := s.cfg.Runc.Create(ctx, in.ID, in.dir, logf); err != nil {
+	if err := s.cfg.Runc.Create(ctx, in.ID, in.dir, filepath.Join(in.dir, "console.log"), a.Lock.Snapshot); err != nil {
 		s.destroy(ctx, in, true)
 		return nil, false, tCompose, tInst, err
 	}
 	return in, res.Cached, tCompose, tInst, nil
+}
+
+// tryRestore restores an instance from the bundle's snapshot, if any.
+func (s *Server) tryRestore(ctx context.Context, a proto.RunArgs) (*instance, time.Duration, error) {
+	if !a.Lock.Snapshot {
+		return nil, 0, nil
+	}
+	if _, ok := s.readSnapshot(a.Lock.BundleDigest); !ok {
+		return nil, 0, nil
+	}
+	t := time.Now()
+	res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := s.ensureStoreView(res.Bundle); err != nil {
+		return nil, 0, err
+	}
+	in, err := s.restoreInstance(ctx, a.Name, a, res.Bundle)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oar-agent: restore of %s failed, starting normally: %v\n", shortDigest(a.Lock.BundleDigest), err)
+		return nil, 0, fmt.Errorf("restore failed: %w", err)
+	}
+	return in, time.Since(t), nil
+}
+
+func shortDigest(d string) string {
+	if _, h, ok := strings.Cut(d, ":"); ok && len(h) > 12 {
+		return h[:12]
+	}
+	return d
 }
 
 // takePrepared returns the prepared instance for name if it matches digest
@@ -795,6 +842,13 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 // instantiate creates the per-instance bundle directory: an overlay mount of
 // the cached layers plus a config.json derived from the cached template.
 func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, init func(*instance)) (*instance, error) {
+	return s.instantiateSeeded(name, b, extraEnv, "", init)
+}
+
+// instantiateSeeded is instantiate with an optional directory whose contents
+// pre-populate the writable layer (snapshot restore). Seeding happens
+// before the overlay is mounted.
+func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []string, seed string, init func(*instance)) (*instance, error) {
 	var rnd [4]byte
 	rand.Read(rnd[:])
 	id := fmt.Sprintf("%s-%s", name, hex.EncodeToString(rnd[:]))
@@ -802,10 +856,18 @@ func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, 
 	if init != nil {
 		init(in)
 	}
-	for _, d := range []string{"rootfs", "upper", "work"} {
+	for _, d := range []string{"rootfs", "work"} {
 		if err := os.MkdirAll(filepath.Join(in.dir, d), 0o755); err != nil {
 			return nil, err
 		}
+	}
+	if seed != "" {
+		if out, err := exec.Command("cp", "-a", seed, filepath.Join(in.dir, "upper")).CombinedOutput(); err != nil {
+			os.RemoveAll(in.dir)
+			return nil, fmt.Errorf("seed writable layer: %v %s", err, out)
+		}
+	} else if err := os.MkdirAll(filepath.Join(in.dir, "upper"), 0o755); err != nil {
+		return nil, err
 	}
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
 		strings.Join(b.Layers, ":"), filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work"))
@@ -821,6 +883,14 @@ func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, 
 	}
 	linux := *spec.Linux
 	linux.CgroupsPath = "/oar/" + id
+	if !s.cfg.Runc.NoPivot {
+		// On a host with shared mounts (native), make the container's
+		// mounts private: nothing depends on host mounts propagating in,
+		// and CRIU refuses mounts whose propagation master is outside the
+		// container. runc rejects this without pivot_root, and the guest's
+		// initramfs root has no shared mounts anyway.
+		linux.RootfsPropagation = "rprivate"
+	}
 	spec.Linux = &linux
 	if _, err := os.Stat("/etc/resolv.conf"); err == nil {
 		spec.Mounts = append(append([]specMount(nil), spec.Mounts...), specMount{

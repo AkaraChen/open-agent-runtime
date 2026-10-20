@@ -103,6 +103,7 @@ func runMain(args []string) error {
 		{"runtime", b.phaseRuntime},
 		{"density", b.phaseDensity},
 		{"switch", b.phaseSwitch},
+		{"snapshot", b.phaseSnapshot},
 		{"correctness", b.phaseCorrectness},
 		{"vm-restart", b.phaseVMRestart},
 	}
@@ -119,7 +120,6 @@ func runMain(args []string) error {
 			}
 		}
 	}
-	b.na("9-snapshot", "snapshot", "快照/恢复相关指标", "尚未实现快照（路线图 P1）")
 	b.res.Duration = time.Since(start).Seconds()
 	return writeJSON(*out, b.res)
 }
@@ -250,6 +250,7 @@ type cfgOpts struct {
 	ready      string // log readiness substring
 	readyTO    string
 	ingress    bool     // serve port 18081 through the ingress proxy
+	snapshot   bool     // process.snapshot
 	components []string // explicit component order (shuffle tests)
 }
 
@@ -292,6 +293,9 @@ process:
 	}
 	if o.ingress {
 		fmt.Fprintf(&sb, "  ports:\n    - {name: http, port: %d, env: MY_AGENT_PORT}\n", ingressPort)
+	}
+	if o.snapshot {
+		sb.WriteString("  snapshot: true\n")
 	}
 	if o.ready != "" {
 		to := o.readyTO
@@ -514,6 +518,8 @@ func (b *bench) phaseBuild() error {
 		"ing-b":   {extra: []string{"nix:jq"}, env: map[string]string{"VARIANT": "ing-b"}, ingress: true},
 		"slowi-a": {env: map[string]string{"VARIANT": "slowi-a", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true},
 		"slowi-b": {env: map[string]string{"VARIANT": "slowi-b", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true},
+		"snap-a":  {env: map[string]string{"VARIANT": "snap-a", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true, snapshot: true},
+		"snap-b":  {env: map[string]string{"VARIANT": "snap-b", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true, snapshot: true},
 	}
 	for name, o := range cfgs {
 		if _, _, err := b.build(name, b.writeConfig(name, o)); err != nil {
@@ -698,7 +704,7 @@ func (b *bench) phaseWarm() error {
 	if err == nil {
 		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB", wb.Uploaded, float64(wb.Bytes)/(1<<20))
 	}
-	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing"} {
+	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if _, err := b.oarJSON(nil, "--bundle", b.digests[name], "warm"); err != nil {
 			return err
 		}
@@ -723,9 +729,12 @@ type runOut struct {
 		Container proto.Container `json:"container"`
 		Cached    bool            `json:"cached"`
 		Timings   struct {
-			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Total float64
+			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Snapshot, Restore, Total float64
 		} `json:"timings"`
-		Replaced string `json:"replaced"`
+		Replaced      string `json:"replaced"`
+		Restored      bool   `json:"restored"`
+		SnapshotBytes int64  `json:"snapshotBytes"`
+		SnapshotNote  string `json:"snapshotNote"`
 	} `json:"result"`
 	Total float64 `json:"total"`
 }
@@ -1346,6 +1355,91 @@ func median(v []float64) float64 {
 		return 0
 	}
 	return s[len(s)/2]
+}
+
+// ---- phase 9: application snapshots ----
+
+func (b *bench) phaseSnapshot() error {
+	const g = "9-snapshot"
+	// first start: application start-up (3 s) plus the checkpoint
+	r, wall, err := b.run("snap", b.digests["snap-a"])
+	if err != nil {
+		return err
+	}
+	t := r.Result.Timings
+	if r.Result.SnapshotNote != "" || t.Snapshot == 0 {
+		note := r.Result.SnapshotNote
+		if note == "" {
+			note = "没有生成快照"
+		}
+		b.rm("snap")
+		b.na(g, "take", "打快照", note)
+		return nil
+	}
+	b.add(g, "first", "首次启动（应用初始化 3 秒 + 打快照）", "ms", true, ms(wall)).Note =
+		fmt.Sprintf("就绪 %.0f ms，打快照 %.0f ms", t.Ready/1e6, t.Snapshot/1e6)
+	b.add(g, "take", "打快照耗时（应用短暂冻结）", "ms", true, t.Snapshot/1e6)
+	b.add(g, "size", "快照大小（CRIU 镜像 + 可写层）", "MiB", true, float64(r.Result.SnapshotBytes)/(1<<20))
+	b.rm("snap")
+
+	// cold start / crash restart: restore instead of start
+	var e2e, restore []float64
+	served := true
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	for i := 0; i < 5; i++ {
+		r, wall, err := b.run("snap", b.digests["snap-a"])
+		if err != nil {
+			return err
+		}
+		if !r.Result.Restored {
+			b.rm("snap")
+			b.fail(g, "restore", "从快照恢复启动", "没有走恢复路径："+r.Result.SnapshotNote)
+			return nil
+		}
+		e2e = append(e2e, ms(wall))
+		restore = append(restore, r.Result.Timings.Restore/1e6)
+		if b.backend == "native" { // VM backends: the forwarder checks below
+			if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", ingressPort)); err != nil || resp.Header.Get("X-Variant") != "snap-a" {
+				served = false
+			} else {
+				resp.Body.Close()
+			}
+		}
+		b.rm("snap")
+	}
+	b.add(g, "cold", "冷启动 / 崩溃重启：从快照恢复（端到端）", "ms", true, e2e...).Note = "对比：不用快照需等应用初始化 3 秒以上"
+	b.add(g, "restore", "　其中：runc restore", "ms", true, restore...)
+	m := b.add(g, "served", "恢复出的实例直接提供服务", "通过", false, boolVal(served))
+	if !served {
+		m.Status = "fail"
+	}
+
+	// switching between two snapshotted bundles without a standby
+	if _, _, err := b.run("snap", b.digests["snap-b"]); err != nil { // snapshot b
+		return err
+	}
+	if _, err := b.oarJSON(nil, "--bundle", b.digests["snap-a"], "reload", "--name", "snap"); err != nil {
+		return err
+	}
+	var sw []float64
+	restoredAll := true
+	for i := 0; i < 4; i++ {
+		target := "snap-b"
+		if i%2 == 1 {
+			target = "snap-a"
+		}
+		var r runOut
+		d, err := b.oarJSON(&r, "--bundle", b.digests[target], "reload", "--name", "snap")
+		if err != nil {
+			return err
+		}
+		restoredAll = restoredAll && r.Result.Restored
+		sw = append(sw, ms(d))
+	}
+	b.rm("snap")
+	b.add(g, "switch", "慢启动应用切换：从快照恢复（无需热备）", "ms", true, sw...).Note =
+		fmt.Sprintf("全部走恢复路径=%v", restoredAll)
+	return nil
 }
 
 // ---- phase 8: correctness ----

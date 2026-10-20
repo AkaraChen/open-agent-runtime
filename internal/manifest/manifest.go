@@ -39,7 +39,9 @@ type PlatformLock struct {
 	// container observes and is therefore not part of the bundle digest.
 	Ready *Ready `json:"ready,omitempty"`
 	// Ports are served by the ingress proxy (lifecycle, not in the digest).
-	Ports    []Port   `json:"ports,omitempty"`
+	Ports []Port `json:"ports,omitempty"`
+	// Snapshot enables checkpoint/restore of ready instances (lifecycle).
+	Snapshot bool     `json:"snapshot,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 }
 

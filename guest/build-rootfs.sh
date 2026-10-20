@@ -8,8 +8,18 @@ rm -rf "$R" && mkdir -p "$R/etc/apk"
 apk --arch "$APKARCH" --root "$R" --initdb --no-scripts --no-cache \
     --keys-dir "/usr/share/apk/keys/$APKARCH" \
     -X "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main" \
-    add alpine-baselayout busybox musl e2fsprogs ca-certificates-bundle >/dev/null
-for a in sh ash ls cat mount umount mkdir ps dmesg echo sleep kill ln rm cp mv df du free top uname vi grep sed awk tar find chmod chown head tail wc; do
+    -X "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/community" \
+    add alpine-baselayout busybox musl e2fsprogs ca-certificates-bundle tar >/dev/null
+# CRIU (application snapshots) is only packaged in edge/testing; pin it
+apk --arch "$APKARCH" --root "$R" --no-scripts --no-cache \
+    --keys-dir "/usr/share/apk/keys/$APKARCH" \
+    -X "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main" \
+    -X "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/community" \
+    -X "https://dl-cdn.alpinelinux.org/alpine/edge/testing" \
+    add "criu=${CRIU_VERSION:-4.2-r0}" >/dev/null
+test -x "$R/usr/sbin/criu" || test -x "$R/usr/bin/criu"
+# (GNU tar, not busybox: CRIU dumps tmpfs contents with GNU tar options)
+for a in sh ash ls cat mount umount mkdir ps dmesg echo sleep kill ln rm cp mv df du free top uname vi grep sed awk find chmod chown head tail wc gzip gunzip zcat; do
   ln -sf /bin/busybox "$R/bin/$a"
 done
 for a in ip ifconfig route udhcpc poweroff reboot halt; do

@@ -81,6 +81,9 @@ type Process struct {
 	User    string            `yaml:"user"`
 	Ready   *Ready            `yaml:"ready"`
 	Ports   []Port            `yaml:"ports"`
+	// Snapshot checkpoints the first ready instance of a bundle (CRIU) and
+	// restores later instances from it, skipping application start-up.
+	Snapshot bool `yaml:"snapshot"`
 }
 
 // Port is a public port served by oar's ingress proxy. Each instance gets
