@@ -4,9 +4,16 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/compose"
 )
 
 func TestUnescapeMountinfo(t *testing.T) {
@@ -54,5 +61,95 @@ func TestPrivateRoot(t *testing.T) {
 	s.StopAll(context.Background())
 	if isMountpoint(dir) {
 		t.Fatal("root still mounted after StopAll")
+	}
+}
+
+// fakeBundle creates n store paths (each with one file) and the view
+// skeleton of a bundle using them.
+func fakeBundle(t testing.TB, s *Server, id string, n int) *compose.Bundle {
+	digest := "sha256:" + strings.Repeat(id, 64/len(id))
+	b := &compose.Bundle{Digest: digest, StoreView: s.layout.StoreView(digest)}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("%032d-p%d", i, i)
+		os.MkdirAll(s.layout.StorePath(name), 0o755)
+		os.WriteFile(filepath.Join(s.layout.StorePath(name), "f"), []byte(name), 0o644)
+		os.MkdirAll(filepath.Join(b.StoreView, name), 0o755)
+		b.StorePaths = append(b.StorePaths, name)
+	}
+	return b
+}
+
+func rootServer(t testing.TB) *Server {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	dir := t.TempDir()
+	s, err := New(Config{Root: dir, Mode: "native", Runc: Runc{Root: dir + "/runc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.StopAll(context.Background()) })
+	return s
+}
+
+func TestStoreView(t *testing.T) {
+	s := rootServer(t)
+	b := fakeBundle(t, s, "a", 120)
+	if err := s.ensureStoreView(b); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(b.StoreView, b.StorePaths[7], "f")
+	if got, _ := os.ReadFile(p); string(got) != b.StorePaths[7] {
+		t.Fatalf("read %q", got)
+	}
+	if err := os.WriteFile(p, []byte("x"), 0o644); !errors.Is(err, unix.EROFS) {
+		t.Fatalf("write to the view: %v, want EROFS", err)
+	}
+	if err := os.WriteFile(filepath.Join(b.StoreView, "new"), nil, 0o644); !errors.Is(err, unix.EROFS) {
+		t.Fatalf("create in the view: %v, want EROFS", err)
+	}
+	// an agent restart removes the old view and rebuilds it on demand
+	s2, err := New(s.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isMountpoint(b.StoreView) {
+		t.Fatal("view of the previous agent still mounted")
+	}
+	if err := s2.ensureStoreView(b); err != nil {
+		t.Fatal(err)
+	}
+	if mps, _ := mountpointsUnder(b.StoreView); len(mps) != 120 {
+		t.Fatalf("%d mounts below the view after a rebuild, want 120", len(mps))
+	}
+	// eviction removes the whole view
+	for i := 0; i < maxStoreViews; i++ {
+		if err := s.ensureStoreView(fakeBundle(t, s, fmt.Sprintf("%x", i+1), 3)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if isMountpoint(b.StoreView) {
+		t.Fatal("evicted view is still mounted")
+	}
+	if mps, _ := mountpointsUnder(b.StoreView); len(mps) != 0 {
+		t.Fatalf("%d mounts left below an evicted view", len(mps))
+	}
+}
+
+// BenchmarkStoreView measures building a 120-path view and evicting it.
+func BenchmarkStoreView(b *testing.B) {
+	s := rootServer(b)
+	bundles := []*compose.Bundle{fakeBundle(b, s, "a", 120)}
+	for i := 0; i < maxStoreViews; i++ {
+		bundles = append(bundles, fakeBundle(b, s, fmt.Sprintf("%x", i+1), 120))
+	}
+	i := 0
+	for b.Loop() {
+		// cycling through cap+1 bundles: every call builds one view and
+		// evicts another
+		if err := s.ensureStoreView(bundles[i%len(bundles)]); err != nil {
+			b.Fatal(err)
+		}
+		i++
 	}
 }
