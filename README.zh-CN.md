@@ -115,6 +115,7 @@ $ ../../bin/oar stop --rm
 | [运维](docs/operations.md) | 切换环境、分发缓存、切换策略 |
 | [平台](docs/platforms.md) | 后端、虚拟机镜像、macOS 说明 |
 | [开发](docs/development.md) | 构建、测试、CI |
+| [VM 运行时调研](docs/research/vm-runtime-landscape.zh-CN.md) | 业界 VM/沙箱方案、优化精要与 oar 路线图（中文） |
 
 > 以上文档目前为英文。
 
