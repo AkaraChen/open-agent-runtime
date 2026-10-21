@@ -7,7 +7,7 @@
 注意：
 - 基线里 vz 的「空闲内存 19.6 MiB」是测量错误（当时没算 Virtualization.framework 的 XPC 进程），之后才修正；它不是回归。
 - 增量 warm 和冷 warm 变慢是有意的取舍：warm 现在要建硬链接视图，并在结束前刷盘，换来首次启动不再有长尾。
-- kvm 容器内 TCP 建连（`net.connect`）从基线的 2.9 ms 变为 9.1 ms，出现在第 6 步（改用 microvm 机型）之后，尚未处理。
+- kvm 容器内 TCP 建连（`net.connect`，9.1 ms，基线 2.9 ms）**不是回归**：这个指标连的是公网 1.1.1.1，主要反映 runner 自己的网络。不用 VM 的 native 在各步里就在 2.0–9.8 ms 之间波动；kvm 改用 microvm 之后也测到过 2.2 ms。已新增 `net.local`（容器 → 宿主机，10 次），用来测 oar 自身的网络路径。
 
 
 ## 测试环境
