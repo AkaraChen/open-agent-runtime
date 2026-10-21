@@ -15,6 +15,7 @@
 | 8 | [端口转发](08-port-forwarding/README.md) | qemu 由 QEMU 自己转发、vz 直连 guest 地址（P1-3）；native 也在 warm 结束前刷盘 |
 | 9 | [剩余路线图评估](09-evaluations/README.md) | Cloud Hypervisor、只读 EROFS 镜像实测后不采用（你确认），内存回收实测无效；路线图完成情况汇总 |
 | 10 | [vz 连接中断](10-vz-connection/README.md) | 宿主机 socket 代理重试并记录连接失败（vz 偶发 EOF 的根因）、连接池存活检查、失败时保存 VM 日志 |
+| — | [总结：优化前后对比](11-final/README.md) | 合并 PR #3 后的完整 benchmark，括号内相对第 0 步基线 |
 
 复现方法：
 
