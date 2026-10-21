@@ -202,10 +202,16 @@ jobs:
         working-directory: head
         run: |
           mkdir -p ../results
+          # resources every minute (job output and the artifact), to find
+          # out why long vz jobs lose their runner
+          hack/ci-resources.sh --watch 60 ../results/resources.log &
+          watcher=$!
+          trap 'kill $watcher 2>/dev/null' EXIT
           for i in $(seq 1 ${{ github.event.inputs.rounds }}); do
             order="base head"
             [ $((i % 2)) = 0 ] && order="head base"
             for side in $order; do
+              hack/ci-resources.sh "before round $i: $side" 2>&1 | tee -a ../results/resources.log
               echo "::group::round $i: $side"
               go run ./hack/bench run -guest-dir $GITHUB_WORKSPACE/$side/guest/out \
                 -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
@@ -216,6 +222,7 @@ jobs:
               echo "::endgroup::"
             done
           done
+          hack/ci-resources.sh "after the last round" 2>&1 | tee -a ../results/resources.log
       - uses: actions/upload-artifact@v7
         if: steps.sel.outputs.run == 'true' && (always())
         with:
