@@ -25,42 +25,119 @@ func extractTar(r io.Reader, dest string) (int, error) {
 	return n, err
 }
 
+// maxDirFds bounds the directory descriptors kept open while extracting.
+const maxDirFds = 256
+
+// extractor holds the state of one extraction. Each path component is
+// resolved once: directories are opened with openat (O_NOFOLLOW, so a
+// symlink is never traversed) and cached, and entries are created relative
+// to their parent's descriptor instead of by full path.
+type extractor struct {
+	fds   map[string]int      // open directories by relative path ("" is dest)
+	known map[string]int      // verified directories: their permission bits now (-1: unknown)
+	files map[string]bool     // non-directory entries created (hard link targets)
+	dirs  map[string]*dirMeta // explicit directory entries, finished last
+}
+
+type dirMeta struct {
+	mode os.FileMode
+	hdr  *tar.Header
+}
+
+func (e *extractor) closeAll() {
+	for _, fd := range e.fds {
+		unix.Close(fd)
+	}
+}
+
+// trim drops the cached descriptors (but the root) when there are many.
+func (e *extractor) trim() {
+	if len(e.fds) <= maxDirFds {
+		return
+	}
+	for rel, fd := range e.fds {
+		if rel != "" {
+			unix.Close(fd)
+			delete(e.fds, rel)
+		}
+	}
+}
+
+// dirFd returns a descriptor for the directory rel below dest. Missing
+// directories are created (0755) when create is set; anything that is not
+// a real directory (a symlink in particular) is refused.
+func (e *extractor) dirFd(rel string, create bool) (int, error) {
+	if fd, ok := e.fds[rel]; ok {
+		return fd, nil
+	}
+	pfd, err := e.dirFd(parentOf(rel), create)
+	if err != nil {
+		return -1, err
+	}
+	name := path.Base(rel)
+	const flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Openat(pfd, name, flags, 0)
+	if errors.Is(err, unix.ENOENT) && create {
+		if err = unix.Mkdirat(pfd, name, 0o755); err == nil {
+			e.known[rel] = 0o755 &^ int(umask)
+			fd, err = unix.Openat(pfd, name, flags, 0)
+		}
+	} else if err == nil {
+		if _, ok := e.known[rel]; !ok {
+			e.known[rel] = -1
+		}
+	}
+	if err != nil {
+		if errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+			return -1, fmt.Errorf("refusing to traverse non-directory %s", rel)
+		}
+		return -1, err
+	}
+	e.fds[rel] = fd
+	return fd, nil
+}
+
+// forget drops everything remembered about rel and below it, once the
+// entry was replaced.
+func (e *extractor) forget(rel string) {
+	prefix := rel + "/"
+	below := func(k string) bool { return k == rel || strings.HasPrefix(k, prefix) }
+	for k, fd := range e.fds {
+		if below(k) {
+			unix.Close(fd)
+			delete(e.fds, k)
+		}
+	}
+	for k := range e.known {
+		if below(k) {
+			delete(e.known, k)
+		}
+	}
+	for k := range e.files {
+		if below(k) {
+			delete(e.files, k)
+		}
+	}
+	for k := range e.dirs {
+		if below(k) {
+			delete(e.dirs, k)
+		}
+	}
+}
+
 func extractTarCount(r io.Reader, dest string, count *int) error {
 	tr := tar.NewReader(r)
-	type dirMeta struct {
-		path string
-		mode os.FileMode
-		hdr  *tar.Header
+	root, err := unix.Open(dest, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
 	}
-	var dirs []dirMeta
-	safeDirs := map[string]bool{"": true}
-
-	// ensureParent creates missing parents and verifies existing ones are
-	// real directories (not symlinks).
-	var ensureDir func(rel string) error
-	ensureDir = func(rel string) error {
-		if safeDirs[rel] {
-			return nil
-		}
-		if err := ensureDir(parentOf(rel)); err != nil {
-			return err
-		}
-		full := filepath.Join(dest, rel)
-		st, err := os.Lstat(full)
-		switch {
-		case err == nil && st.IsDir():
-		case err == nil:
-			return fmt.Errorf("refusing to traverse non-directory %s", rel)
-		case os.IsNotExist(err):
-			if err := os.Mkdir(full, 0o755); err != nil {
-				return err
-			}
-		default:
-			return err
-		}
-		safeDirs[rel] = true
-		return nil
+	e := &extractor{
+		fds:   map[string]int{"": root},
+		known: map[string]int{"": -1},
+		files: map[string]bool{},
+		dirs:  map[string]*dirMeta{},
 	}
+	defer e.closeAll()
 
 	for {
 		hdr, err := tr.Next()
@@ -75,9 +152,12 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 			continue
 		}
 		*count++
-		if err := ensureDir(parentOf(rel)); err != nil {
+		e.trim()
+		pfd, err := e.dirFd(parentOf(rel), true)
+		if err != nil {
 			return err
 		}
+		name := path.Base(rel)
 		full := filepath.Join(dest, rel)
 		mode := os.FileMode(hdr.Mode).Perm()
 		if hdr.Mode&04000 != 0 {
@@ -93,16 +173,16 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 		// only for duplicates, which then replace what is there (no lstat
 		// per entry)
 		replace := func() error {
-			st, err := os.Lstat(full)
-			if err != nil {
+			var st unix.Stat_t
+			if err := unix.Fstatat(pfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return err
 			}
-			if st.IsDir() {
+			if st.Mode&unix.S_IFMT == unix.S_IFDIR {
 				err = os.RemoveAll(full)
 			} else {
-				err = os.Remove(full)
+				err = unix.Unlinkat(pfd, name, 0)
 			}
-			delete(safeDirs, rel)
+			e.forget(rel)
 			return err
 		}
 		retry := func(create func() error) error {
@@ -117,15 +197,32 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := ensureDir(rel); err != nil {
+			// as root a directory gets its final mode at once (it can be
+			// written to regardless); otherwise it stays owner-writable
+			// until the end
+			perm := mode.Perm()
+			if !isRoot {
+				perm |= 0o700
+			}
+			switch err := unix.Mkdirat(pfd, name, uint32(perm)); {
+			case err == nil:
+				e.known[rel] = int(perm) &^ int(umask)
+			case errors.Is(err, os.ErrExist):
+				if _, err := e.dirFd(rel, false); err != nil {
+					return err
+				}
+			default:
 				return err
 			}
-			dirs = append(dirs, dirMeta{full, mode, hdr})
+			e.dirs[rel] = &dirMeta{mode, hdr}
 			continue
 		case tar.TypeReg, tar.TypeRegA:
 			var f *os.File
-			if err := retry(func() (err error) {
-				f, err = os.OpenFile(full, os.O_CREATE|os.O_EXCL|os.O_WRONLY|unix.O_NOFOLLOW, mode.Perm())
+			if err := retry(func() error {
+				fd, err := unix.Openat(pfd, name, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+				if err == nil {
+					f = os.NewFile(uintptr(fd), full)
+				}
 				return err
 			}); err != nil {
 				return err
@@ -141,20 +238,29 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 			if err != nil {
 				return err
 			}
+			e.files[rel] = true
 			continue // metadata applied on the open file
 		case tar.TypeSymlink:
-			if err := retry(func() error { return os.Symlink(hdr.Linkname, full) }); err != nil {
+			if err := retry(func() error { return unix.Symlinkat(hdr.Linkname, pfd, name) }); err != nil {
 				return err
 			}
 		case tar.TypeLink:
 			target := path.Clean("/" + hdr.Linkname)[1:]
-			tfull := filepath.Join(dest, target)
-			if st, err := os.Lstat(tfull); err != nil || st.IsDir() {
+			tname := path.Base(target)
+			tpfd, err := e.dirFd(parentOf(target), false)
+			if err != nil {
 				return fmt.Errorf("bad hardlink %s -> %s", rel, hdr.Linkname)
 			}
-			if err := retry(func() error { return os.Link(tfull, full) }); err != nil {
+			if !e.files[target] { // not made by this extraction: check it
+				var st unix.Stat_t
+				if err := unix.Fstatat(tpfd, tname, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || st.Mode&unix.S_IFMT == unix.S_IFDIR {
+					return fmt.Errorf("bad hardlink %s -> %s", rel, hdr.Linkname)
+				}
+			}
+			if err := retry(func() error { return unix.Linkat(tpfd, tname, pfd, name, 0) }); err != nil {
 				return err
 			}
+			e.files[rel] = true
 			continue // shares metadata with the target
 		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
 			m := uint32(unix.S_IFIFO)
@@ -164,20 +270,32 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 				m = unix.S_IFBLK
 			}
 			dev := unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor))
-			if err := retry(func() error { return unix.Mknod(full, m|uint32(mode.Perm()), int(dev)) }); err != nil {
+			if err := retry(func() error { return unix.Mknodat(pfd, name, m|uint32(mode.Perm()), int(dev)) }); err != nil {
 				return err
 			}
 		default:
 			continue
 		}
-		if err := applyMeta(full, hdr, mode, hdr.Typeflag == tar.TypeSymlink); err != nil {
+		e.files[rel] = true
+		if err := nodeMeta(pfd, name, full, hdr, mode, int(mode.Perm())&^int(umask), hdr.Typeflag == tar.TypeSymlink); err != nil {
 			return err
 		}
 	}
-	// directories last, deepest first, so read-only dirs don't block children
-	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i].path) > len(dirs[j].path) })
-	for _, d := range dirs {
-		if err := applyMeta(d.path, d.hdr, d.mode, false); err != nil {
+	// directories last, children before parents (reverse path order), so
+	// modes without owner access don't block what is below
+	rels := make([]string, 0, len(e.dirs))
+	for rel := range e.dirs {
+		rels = append(rels, rel)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(rels)))
+	for _, rel := range rels {
+		d := e.dirs[rel]
+		e.trim()
+		pfd, err := e.dirFd(parentOf(rel), false)
+		if err != nil {
+			return err
+		}
+		if err := nodeMeta(pfd, path.Base(rel), filepath.Join(dest, rel), d.hdr, d.mode, e.known[rel], false); err != nil {
 			return err
 		}
 	}
@@ -199,13 +317,21 @@ var umask = func() os.FileMode {
 	return os.FileMode(m)
 }()
 
+// The effective ids, read once: files and directories are created with
+// them, so ownership only needs setting when the tar says otherwise. Root
+// (CAP_DAC_OVERRIDE) can create entries below directories of any mode.
+var (
+	euid, egid = os.Geteuid(), os.Getegid()
+	isRoot     = euid == 0
+)
+
 // fileMeta applies a regular file's metadata through its open descriptor:
 // no path lookups, and no chown or chmod when creation already got them
 // right (the common case: root-owned files whose mode the umask keeps).
 func fileMeta(f *os.File, hdr *tar.Header, mode os.FileMode) error {
 	fd := int(f.Fd())
 	chowned := false
-	if hdr.Uid != os.Geteuid() || hdr.Gid != os.Getegid() {
+	if hdr.Uid != euid || hdr.Gid != egid {
 		if err := unix.Fchown(fd, hdr.Uid, hdr.Gid); err != nil && !errors.Is(err, unix.EPERM) {
 			return err
 		}
@@ -213,7 +339,7 @@ func fileMeta(f *os.File, hdr *tar.Header, mode os.FileMode) error {
 	}
 	for k, v := range hdr.PAXRecords {
 		if name, ok := strings.CutPrefix(k, "SCHILY.xattr."); ok {
-			_ = unix.Fsetxattr(fd, name, []byte(v), 0) // best effort, as applyMeta
+			_ = unix.Fsetxattr(fd, name, []byte(v), 0) // best effort, as nodeMeta
 		}
 	}
 	if chowned || mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || mode.Perm()&umask != 0 {
@@ -228,18 +354,35 @@ func fileMeta(f *os.File, hdr *tar.Header, mode os.FileMode) error {
 	return unix.Futimes(fd, []unix.Timeval{unix.NsecToTimeval(atime.UnixNano()), unix.NsecToTimeval(hdr.ModTime.UnixNano())})
 }
 
-func applyMeta(full string, hdr *tar.Header, mode os.FileMode, symlink bool) error {
-	if err := os.Lchown(full, hdr.Uid, hdr.Gid); err != nil && !os.IsPermission(err) {
-		return err
-	}
-	for k, v := range hdr.PAXRecords {
-		if name, ok := strings.CutPrefix(k, "SCHILY.xattr."); ok {
-			// best effort: some filesystems reject security.* or trusted.*
-			_ = unix.Lsetxattr(full, name, []byte(v), 0)
+// nodeMeta applies the metadata of the entry name below the directory pfd
+// (a symlink, device, fifo or directory), by name relative to pfd and
+// without following a final symlink. cur is the permission bits the entry
+// has now, or -1 if unknown (it then also gets chowned and chmoded);
+// ownership and mode are only set when they differ.
+func nodeMeta(pfd int, name, full string, hdr *tar.Header, mode os.FileMode, cur int, symlink bool) error {
+	if hdr.Uid != euid || hdr.Gid != egid || cur < 0 {
+		if err := unix.Fchownat(pfd, name, hdr.Uid, hdr.Gid, unix.AT_SYMLINK_NOFOLLOW); err != nil && !errors.Is(err, unix.EPERM) {
+			return err
 		}
 	}
-	if !symlink {
-		if err := os.Chmod(full, mode); err != nil {
+	for k, v := range hdr.PAXRecords {
+		if xname, ok := strings.CutPrefix(k, "SCHILY.xattr."); ok {
+			// best effort: some filesystems reject security.* or trusted.*
+			_ = unix.Lsetxattr(full, xname, []byte(v), 0)
+		}
+	}
+	if !symlink && (cur != int(mode.Perm()) || mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0) {
+		m := uint32(mode.Perm())
+		if mode&os.ModeSetuid != 0 {
+			m |= unix.S_ISUID
+		}
+		if mode&os.ModeSetgid != 0 {
+			m |= unix.S_ISGID
+		}
+		if mode&os.ModeSticky != 0 {
+			m |= unix.S_ISVTX
+		}
+		if err := unix.Fchmodat(pfd, name, m, 0); err != nil {
 			return err
 		}
 	}
@@ -247,5 +390,5 @@ func applyMeta(full string, hdr *tar.Header, mode os.FileMode, symlink bool) err
 	if !hdr.AccessTime.IsZero() {
 		ts[0] = unix.NsecToTimespec(hdr.AccessTime.UnixNano())
 	}
-	return unix.UtimesNanoAt(unix.AT_FDCWD, full, ts, unix.AT_SYMLINK_NOFOLLOW)
+	return unix.UtimesNanoAt(pfd, name, ts, unix.AT_SYMLINK_NOFOLLOW)
 }
