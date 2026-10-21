@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -37,7 +38,7 @@ func (p *connPool) get(ctx context.Context) (net.Conn, error) {
 	for len(p.idle) > 0 {
 		pc := p.idle[len(p.idle)-1]
 		p.idle = p.idle[:len(p.idle)-1]
-		if time.Since(pc.created) < p.maxAge {
+		if time.Since(pc.created) < p.maxAge && alive(pc.c) {
 			p.mu.Unlock()
 			p.refill()
 			return pc.c, nil
@@ -105,4 +106,23 @@ func (p *connPool) close() {
 		pc.c.Close()
 	}
 	p.idle = nil
+}
+
+// alive reports whether an idle connection is still open. The agent never
+// sends unsolicited data, so pending EOF means the guest side closed the
+// connection while it sat in the pool (it would otherwise fail the request
+// it is used for).
+func alive(c net.Conn) bool {
+	if closed, ok := peekClosed(c); ok {
+		return !closed
+	}
+	// no access to the socket (VZ): a read with a very short deadline
+	if err := c.SetReadDeadline(time.Now().Add(100 * time.Microsecond)); err != nil {
+		return true // cannot tell; let the request find out
+	}
+	var b [1]byte
+	_, err := c.Read(b[:])
+	c.SetReadDeadline(time.Time{})
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
