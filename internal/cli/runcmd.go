@@ -136,6 +136,8 @@ type warmStats struct {
 	Compressed bool          `json:"compressed,omitempty"`
 	View       time.Duration `json:"view,omitempty"`
 	Flush      time.Duration `json:"flush,omitempty"`
+	// DirtyBeforeFlush is the guest's Dirty + Writeback before the final flush.
+	DirtyBeforeFlush int64 `json:"dirtyBeforeFlush,omitempty"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -283,7 +285,7 @@ func (s *session) precompose(ctx context.Context, stats *warmStats) error {
 	var res proto.ComposeResult
 	flush := warmTuningFor(s.g).Flush
 	err := s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
-	stats.View, stats.Flush = res.View, res.Flush
+	stats.View, stats.Flush, stats.DirtyBeforeFlush = res.View, res.Flush, res.DirtyBeforeFlush
 	return err
 }
 

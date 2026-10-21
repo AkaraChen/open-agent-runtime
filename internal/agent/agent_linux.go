@@ -198,11 +198,13 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 			return nil, err
 		}
 		tFlush := time.Now()
+		var dirty int64
 		if a.Flush {
+			dirty = dirtyBytes()
 			s.flushCache()
 		}
 		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers,
-			View: tFlush.Sub(tView), Flush: time.Since(tFlush)}, nil
+			View: tFlush.Sub(tView), Flush: time.Since(tFlush), DirtyBeforeFlush: dirty}, nil
 	case proto.OpRun, proto.OpReload:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -402,7 +404,7 @@ func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, 
 		}
 	}
 	if writeback {
-		s.kickWriteback()
+		defer s.beginWriteback()()
 	}
 	files, err := extractTar(&cr, extractRoot)
 	if err != nil {

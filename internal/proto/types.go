@@ -111,6 +111,9 @@ type ComposeResult struct {
 	// view and writing the cache back (warm precompose).
 	View  time.Duration `json:"view,omitempty"`
 	Flush time.Duration `json:"flush,omitempty"`
+	// DirtyBeforeFlush is Dirty + Writeback right before the final flush:
+	// what background writeback left for it.
+	DirtyBeforeFlush int64 `json:"dirtyBeforeFlush,omitempty"`
 }
 
 // Reload strategies.

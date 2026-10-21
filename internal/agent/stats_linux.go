@@ -121,3 +121,20 @@ func (s *Server) stats() proto.StatsResult {
 	}
 	return res
 }
+
+// dirtyBytes is Dirty + Writeback from /proc/meminfo.
+func dirtyBytes() int64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var n int64
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && (f[0] == "Dirty:" || f[0] == "Writeback:") {
+			v, _ := strconv.ParseInt(f[1], 10, 64)
+			n += v << 10
+		}
+	}
+	return n
+}

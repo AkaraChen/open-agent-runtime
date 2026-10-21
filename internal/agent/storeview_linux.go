@@ -466,43 +466,54 @@ func (vb *viewBuild) finish() {
 	}
 }
 
-// Background writeback during a warm: while uploads keep arriving, the
+// Background writeback during a warm: while uploads are in flight, the
 // cache filesystem is synced in a loop, so the disk writes the extracted
 // data while later artifacts transfer and extract, and the final flush
-// only has the tail left. It stops once no upload arrived for a while.
+// only has the tail left. The loop follows the number of uploads in
+// progress and stops a short idle period after the last one finished.
 var (
 	writebackMu     sync.Mutex
 	writebackActive bool
+	writebackN      int
 	writebackLast   time.Time
 )
 
 const writebackIdle = 500 * time.Millisecond
 
-func (s *Server) kickWriteback() {
+// beginWriteback marks one upload as in progress and returns the function
+// that marks it finished.
+func (s *Server) beginWriteback() (done func()) {
 	writebackMu.Lock()
 	defer writebackMu.Unlock()
-	writebackLast = time.Now()
-	if writebackActive {
-		return
+	writebackN++
+	if !writebackActive {
+		writebackActive = true
+		go s.writebackLoop()
 	}
-	writebackActive = true
-	go func() {
-		f, err := os.Open(s.cfg.Root)
+	return func() {
+		writebackMu.Lock()
+		writebackN--
+		writebackLast = time.Now()
+		writebackMu.Unlock()
+	}
+}
+
+func (s *Server) writebackLoop() {
+	f, err := os.Open(s.cfg.Root)
+	if err == nil {
+		defer f.Close()
+	}
+	for {
 		if err == nil {
-			defer f.Close()
+			unix.Syncfs(int(f.Fd()))
 		}
-		for {
-			if err == nil {
-				unix.Syncfs(int(f.Fd()))
-			}
-			writebackMu.Lock()
-			if time.Since(writebackLast) > writebackIdle {
-				writebackActive = false
-				writebackMu.Unlock()
-				return
-			}
+		writebackMu.Lock()
+		if writebackN == 0 && time.Since(writebackLast) > writebackIdle {
+			writebackActive = false
 			writebackMu.Unlock()
-			time.Sleep(100 * time.Millisecond)
+			return
 		}
-	}()
+		writebackMu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
 }
