@@ -138,14 +138,19 @@ type warmStats struct {
 	Flush      time.Duration `json:"flush,omitempty"`
 }
 
-// warm uploads missing artifacts into the guest cache.
+// warm uploads missing artifacts into the guest cache. Whatever was
+// uploaded also gets the view.prepare/flush treatment (see warmOpt), so a
+// direct run/reload of a new closure does not pay for it in the start path.
 func (s *session) warm(ctx context.Context, verbose bool) (*warmStats, error) {
 	return s.warmOpt(ctx, verbose, false)
 }
 
 // warmOpt uploads missing artifacts; with precompose it also builds the
-// bundle template and store view (run/reload compose anyway, so they skip
-// the extra round trip).
+// bundle template and store view. Without it (run/reload/prepare) the view
+// is still prepared during the upload and, on VM guests, the cache is
+// written back after it (the compose op with Flush; it also builds the
+// template, which the following request would build anyway). Nothing
+// uploaded means no extra round trip.
 func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmStats, error) {
 	start := time.Now()
 	items, paths := warmItems(s.art, s.lock)
@@ -171,18 +176,18 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	if verbose {
 		fmt.Fprintf(os.Stderr, "warming guest cache: %d of %d artifacts (%s)\n", len(st.Missing), len(items), human(total))
 	}
-	if precompose {
+	{
 		// the agent links the store paths it already has into the view
 		// while the rest uploads (an older agent rejects the op: ignored)
 		var ok map[string]string
 		_ = s.client.Call(ctx, proto.OpViewPrepare, proto.ComposeArgs{Lock: s.lock}, &ok)
 	}
+	tuning := warmTuningFor(s.g)
 	// biggest first keeps the pipeline busy
 	sort.Slice(st.Missing, func(i, j int) bool { return st.Missing[i].Size > st.Missing[j].Size })
 	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
-	tuning := warmTuningFor(s.g)
 	compress, writeback := tuning.Compress, tuning.Writeback
 	var wire atomic.Int64
 	tUpload := time.Now()
@@ -220,7 +225,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 		return nil, err
 	}
 	stats.Upload = time.Since(tUpload)
-	if precompose {
+	if precompose || tuning.Flush {
 		t := time.Now()
 		if err := s.precompose(ctx, stats); err != nil {
 			return nil, err
