@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.26"
 
 jobs:
   unit:
@@ -19,11 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
+        os: [ubuntu-26.04, macos-26, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: go vet ./...
@@ -57,15 +57,15 @@ jobs:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: kernel cache
         id: kcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: guest/out/${{ matrix.arch }}/kernel*
           key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
@@ -74,7 +74,7 @@ jobs:
         run: guest/build.sh ${{ matrix.arch }} kernel
       - name: build initramfs
         run: guest/build.sh ${{ matrix.arch }} initramfs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}
           path: guest/out/${{ matrix.arch }}/
@@ -82,10 +82,10 @@ jobs:
 
   e2e-linux-native:
     name: e2e linux native (runc on host)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
@@ -101,13 +101,13 @@ jobs:
   e2e-linux-kvm:
     name: e2e linux kvm (resident QEMU/KVM guest)
     needs: guest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: guest-amd64
           path: guest/out/amd64
@@ -136,19 +136,19 @@ jobs:
       matrix:
         include:
           # Intel runners expose the hypervisor: full VZ run
-          - { os: macos-15-intel, arch: amd64, backend: vz }
+          - { os: macos-26-intel, arch: amd64, backend: vz }
           # Apple Silicon runners are M1 VMs without nested virtualization:
           # VZ must be reported unavailable, the resident guest runs on QEMU
-          - { os: macos-15, arch: arm64, backend: vz, expect: unavailable }
-          - { os: macos-15, arch: arm64, backend: qemu }
+          - { os: macos-26, arch: arm64, backend: vz, expect: unavailable }
+          - { os: macos-26, arch: arm64, backend: qemu }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - uses: cachix/install-nix-action@v31
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}
           path: guest/out/${{ matrix.arch }}

@@ -20,7 +20,7 @@ on:
         default: native,kvm,vz,qemu
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.26"
 
 jobs:
   guest:
@@ -28,22 +28,22 @@ jobs:
     strategy:
       matrix:
         arch: [amd64, arm64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: kernel cache
         id: kcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: guest/out/${{ matrix.arch }}/kernel*
           key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
       - if: steps.kcache.outputs.cache-hit != 'true'
         run: guest/build.sh ${{ matrix.arch }} kernel
       - run: guest/build.sh ${{ matrix.arch }} initramfs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}
           path: guest/out/${{ matrix.arch }}/
@@ -55,24 +55,24 @@ jobs:
     strategy:
       matrix:
         arch: [amd64, arm64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.base }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: kernel cache
         id: kcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: guest/out/${{ matrix.arch }}/kernel*
           key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
       - if: steps.kcache.outputs.cache-hit != 'true'
         run: guest/build.sh ${{ matrix.arch }} kernel
       - run: guest/build.sh ${{ matrix.arch }} initramfs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}-base
           path: guest/out/${{ matrix.arch }}/
@@ -86,19 +86,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, arch: amd64, backend: native, label: native }
-          - { os: ubuntu-latest, arch: amd64, backend: kvm, label: kvm }
-          - { os: macos-15-intel, arch: amd64, backend: vz, label: vz-intel }
-          - { os: macos-15, arch: arm64, backend: qemu, label: qemu-arm64 }
+          - { os: ubuntu-26.04, arch: amd64, backend: native, label: native }
+          - { os: ubuntu-26.04, arch: amd64, backend: kvm, label: kvm }
+          - { os: macos-26-intel, arch: amd64, backend: vz, label: vz-intel }
+          - { os: macos-26, arch: arm64, backend: qemu, label: qemu-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - if: runner.os == 'macOS'
         uses: cachix/install-nix-action@v31
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}
           path: guest/out/${{ matrix.arch }}
@@ -127,7 +127,7 @@ jobs:
           go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
             -profile ${{ github.event.inputs.profile || 'quick' }} \
             -out results-${{ matrix.label }}.json -- --cpus 2 --memory 4096
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: results-${{ matrix.label }}
@@ -145,38 +145,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, arch: amd64, backend: native, label: native }
-          - { os: ubuntu-latest, arch: amd64, backend: kvm, label: kvm }
-          - { os: macos-15-intel, arch: amd64, backend: vz, label: vz-intel }
-          - { os: macos-15, arch: arm64, backend: qemu, label: qemu-arm64 }
+          - { os: ubuntu-26.04, arch: amd64, backend: native, label: native }
+          - { os: ubuntu-26.04, arch: amd64, backend: kvm, label: kvm }
+          - { os: macos-26-intel, arch: amd64, backend: vz, label: vz-intel }
+          - { os: macos-26, arch: arm64, backend: qemu, label: qemu-arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 300
     steps:
       - id: sel
         run: case ",${{ github.event.inputs.backends }}," in *",${{ matrix.backend }},"*) echo run=true >> "$GITHUB_OUTPUT" ;; esac
       - if: steps.sel.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: head
       - if: steps.sel.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: base
           ref: ${{ github.event.inputs.base }}
       - if: steps.sel.outputs.run == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: head/go.sum
       - if: steps.sel.outputs.run == 'true' && (runner.os == 'macOS')
         uses: cachix/install-nix-action@v31
       - if: steps.sel.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}
           path: head/guest/out/${{ matrix.arch }}
       - if: steps.sel.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}-base
           path: base/guest/out/${{ matrix.arch }}
@@ -216,7 +216,7 @@ jobs:
               echo "::endgroup::"
             done
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.sel.outputs.run == 'true' && (always())
         with:
           name: ab-${{ matrix.label }}
