@@ -961,7 +961,7 @@ func (b *bench) directStart() error {
 	}
 	b.add(g, "direct.run", "直接 run 一个产物不在 guest 缓存的组合（命令到就绪，CLI 墙钟）", "ms", true, ms(wall)).Note = note(r)
 	// (ii) reload to a bundle that adds one new package
-	if _, _, err := b.build("direct-reload", b.writeConfig("direct-reload", cfgOpts{extra: []string{"nix:perl"}, env: map[string]string{"VARIANT": "direct-reload"}})); err != nil {
+	if _, _, err := b.build("direct-reload", b.writeConfig("direct-reload", cfgOpts{extra: []string{"nix:ripgrep"}, env: map[string]string{"VARIANT": "direct-reload"}})); err != nil {
 		b.rm("direct")
 		return err
 	}
