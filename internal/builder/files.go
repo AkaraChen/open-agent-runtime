@@ -32,6 +32,8 @@ func (b *Builder) runSourceBuild(name string, src *spec.Source, p spec.Platform)
 	for i, a := range src.Build {
 		args[i] = spec.Expand(a, p)
 	}
+	b.srcMu.Lock()
+	defer b.srcMu.Unlock()
 	cmd := exec.CommandContext(b.ctx, args[0], args[1:]...)
 	cmd.Dir = b.cfg.Dir
 	cmd.Env = append(os.Environ(), "OAR_ARCH="+p.Arch, "OAR_OS="+p.OS, "OAR_PLATFORM="+p.String())

@@ -48,6 +48,8 @@ func evalKey(rev, system, attr string) string { return rev + "/" + system + "/" 
 // attributes that were never evaluated at this revision, as a child
 // `oar nix-eval` process (docs/design/embedded-nix-evaluator.md).
 func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map[string]evalResult, error) {
+	b.evalMu.Lock()
+	defer b.evalMu.Unlock()
 	cachePath := filepath.Join(b.opts.Artifacts, "manifests", "nix-eval.json")
 	var cache evalCache
 	_ = manifest.ReadJSON(cachePath, &cache)
@@ -68,7 +70,7 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 		return out, nil
 	}
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
-	b.opts.Stats.EvaluatedAttr += len(missing)
+	b.stats(func(st *Stats) { st.EvaluatedAttr += len(missing) })
 	child := nixeval.Child{Log: b.opts.Log}
 	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing, Mirror: b.cfg.Runtime.NixpkgsMirror})
 	if err != nil {
@@ -278,11 +280,11 @@ func (f *fetcher) fetch(base string) (*storeMeta, error) {
 	if err := manifest.WriteJSON(metaPath, m); err != nil {
 		return nil, err
 	}
-	f.mu.Lock()
+	f.b.mu.Lock()
 	f.b.fetched++
 	f.b.opts.Stats.FetchedPaths++
 	f.b.opts.Stats.FetchedBytes += tarSize
-	f.mu.Unlock()
+	f.b.mu.Unlock()
 	f.b.logf("  fetched %s (%s)", base, humanSize(tarSize))
 	return m, nil
 }

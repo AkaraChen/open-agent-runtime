@@ -14,7 +14,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
@@ -51,8 +54,41 @@ type Builder struct {
 	cfg  *spec.Config
 	opts Options
 	prev *manifest.Lock
+	// Platforms, and the stages of one platform, build concurrently on
+	// copies of the Builder (each with its own cancellable ctx) that share
+	// this state.
+	*shared
+}
+
+type shared struct {
+	// mu guards opts.Stats and fetched
+	mu sync.Mutex
 	// fetched counts store paths downloaded during this build
 	fetched int
+	// evalMu serializes evalPackages, which read-modify-writes nix-eval.json
+	evalMu sync.Mutex
+	// srcMu serializes user build commands (sources.*.build), which may
+	// share output files between platforms
+	srcMu sync.Mutex
+}
+
+// stats runs fn with exclusive access to the build statistics.
+func (b *Builder) stats(fn func(st *Stats)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	fn(b.opts.Stats)
+}
+
+// syncWriter makes a log shared by concurrent stages safe to write to.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // LockPath returns the lock location inside an artifacts dir.
@@ -155,12 +191,13 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 	if opts.Log == nil {
 		opts.Log = io.Discard
 	}
+	opts.Log = &syncWriter{w: opts.Log}
 	if opts.Stats == nil {
 		opts.Stats = &Stats{}
 	}
 	start := time.Now()
 	defer func() { opts.Stats.Total = time.Since(start) }()
-	b := &Builder{ctx: ctx, cfg: cfg, opts: opts}
+	b := &Builder{ctx: ctx, cfg: cfg, opts: opts, shared: &shared{}}
 	if prev, err := manifest.Read(LockPath(opts.Artifacts)); err == nil {
 		b.prev = prev
 	}
@@ -184,21 +221,38 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 			lock.Platforms[k] = v
 		}
 	}
+	var parsed []spec.Platform
 	for _, ps := range platforms {
 		p, err := spec.ParsePlatform(ps)
 		if err != nil {
 			return nil, err
 		}
-		pl, err := b.buildPlatform(p, indexDigest)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
-		}
-		lock.Platforms[p.String()] = pl
-		// every compiled bundle stays addressable by digest, so configs can
-		// be switched (or shipped) without rebuilding
-		if err := manifest.WriteJSON(BundlePath(opts.Artifacts, pl.BundleDigest), pl); err != nil {
-			return nil, err
-		}
+		parsed = append(parsed, p)
+	}
+	// platforms share no inputs, so they build side by side
+	var lockMu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	for _, p := range parsed {
+		g.Go(func() error {
+			pb := *b
+			pb.ctx = gctx
+			pl, err := pb.buildPlatform(p, indexDigest)
+			if err != nil {
+				return fmt.Errorf("%s: %w", p, err)
+			}
+			// every compiled bundle stays addressable by digest, so configs
+			// can be switched (or shipped) without rebuilding
+			if err := manifest.WriteJSON(BundlePath(opts.Artifacts, pl.BundleDigest), pl); err != nil {
+				return err
+			}
+			lockMu.Lock()
+			lock.Platforms[p.String()] = pl
+			lockMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	if err := manifest.WriteJSON(LockPath(opts.Artifacts), lock); err != nil {
 		return nil, err
@@ -220,100 +274,72 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 	if err != nil {
 		return nil, err
 	}
-	st := b.opts.Stats
-	t := time.Now()
-	base, err := b.buildBase(p, indexDigest)
-	if err != nil {
-		return nil, err
-	}
-	st.Base += time.Since(t)
 	pl := &manifest.PlatformLock{
 		Platform: p.String(),
-		Base:     base.Base,
 		Hostname: b.cfg.Runtime.Hostname,
 	}
 	if pl.Hostname == "" {
 		pl.Hostname = "oar"
 	}
 
-	// Nix packages, evaluated once per nixpkgs revision
-	var nixRefs []spec.Ref
-	byRev := map[string][]string{}
-	for _, r := range refs {
-		if r.Kind == spec.KindNix {
-			nixRefs = append(nixRefs, r)
-			rev := b.cfg.NixRevision(r)
-			byRev[rev] = append(byRev[rev], r.Name)
-		}
-	}
-	var storeIndex map[string]*storeMeta
-	if len(nixRefs) > 0 {
-		evals := map[string]evalResult{} // keyed by rev + "/" + attr
-		t = time.Now()
-		for _, rev := range sortedKeys(byRev) {
-			res, err := b.evalPackages(p, rev, byRev[rev])
+	// The base image, the nix closure and the imported components do not
+	// depend on each other: pull, evaluate and download, and import run
+	// side by side.
+	var (
+		base       *BaseManifest
+		storeIndex map[string]*storeMeta
+		packages   []manifest.Package
+		components = make([]*manifest.Component, len(refs))
+	)
+	g, ctx := errgroup.WithContext(b.ctx)
+	pb := *b // per-platform view whose requests stop when a sibling stage fails
+	pb.ctx = ctx
+	g.Go(func() (err error) {
+		t := time.Now()
+		defer func() { b.stats(func(st *Stats) { st.Base += time.Since(t) }) }()
+		base, err = pb.buildBase(p, indexDigest)
+		return err
+	})
+	g.Go(func() (err error) {
+		storeIndex, packages, err = pb.buildNix(p, refs)
+		return err
+	})
+	g.Go(func() error {
+		t := time.Now()
+		defer func() { b.stats(func(st *Stats) { st.Components += time.Since(t) }) }()
+		for i, r := range refs {
+			if r.Kind == spec.KindNix {
+				continue
+			}
+			c, err := pb.buildComponent(r, p)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			for a, r := range res {
-				evals[rev+"/"+a] = r
-			}
+			components[i] = c
 		}
-		var roots []string
-		for _, r := range nixRefs {
-			roots = append(roots, evals[b.cfg.NixRevision(r)+"/"+r.Name].Outputs...)
-		}
-		st.Eval += time.Since(t)
-		t = time.Now()
-		var err error
-		storeIndex, err = b.fetchClosure(roots)
-		if err != nil {
-			return nil, err
-		}
-		st.Fetch += time.Since(t)
-		for _, r := range nixRefs {
-			rev := b.cfg.NixRevision(r)
-			ev := evals[rev+"/"+r.Name]
-			pk := manifest.Package{Attr: r.Name, Nixpkgs: rev, OutPath: ev.Outputs[0], System: p.NixSystem()}
-			for _, o := range ev.Outputs {
-				pk.Bins = append(pk.Bins, storeIndex[path.Base(o)].Bins...)
-			}
-			sort.Strings(pk.Bins)
-			pl.Packages = append(pl.Packages, pk)
-		}
-		var total int64
-		for _, m := range storeIndex {
-			pl.StorePaths = append(pl.StorePaths, m.StorePath)
-			total += m.Size
-		}
-		st.ClosurePaths += len(storeIndex)
-		st.ClosureBytes += total
-		if b.fetched > 0 {
-			b.logf("closure for %s: %d store paths, %s (%d fetched)", p, len(storeIndex), humanSize(total), b.fetched)
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	pl.Base = base.Base
+	pl.Packages = packages
+	for _, m := range storeIndex {
+		pl.StorePaths = append(pl.StorePaths, m.StorePath)
+	}
+	for _, c := range components {
+		if c != nil {
+			pl.Components = append(pl.Components, *c)
 		}
 	}
 
-	// Imported components
-	t = time.Now()
-	for _, r := range refs {
-		if r.Kind == spec.KindNix {
-			continue
-		}
-		c, err := b.buildComponent(r, p)
-		if err != nil {
-			return nil, err
-		}
-		pl.Components = append(pl.Components, *c)
-	}
-	st.Components += time.Since(t)
-
-	t = time.Now()
+	t := time.Now()
 	pl.Normalize()
 	warnings, err := checkConflicts(pl, base, storeIndex, p)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { st.Checks += time.Since(t) }()
+	defer func() { b.stats(func(st *Stats) { st.Checks += time.Since(t) }) }()
 	pl.Warnings = warnings
 	if err := b.resolveProcess(pl, base); err != nil {
 		return nil, err
@@ -324,6 +350,74 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 	}
 	pl.BundleDigest = pl.ComputeDigest()
 	return pl, nil
+}
+
+// buildNix evaluates the nix components (once per nixpkgs revision) and
+// fetches their closure. It returns the closure and the resolved packages.
+func (b *Builder) buildNix(p spec.Platform, refs []spec.Ref) (map[string]*storeMeta, []manifest.Package, error) {
+	var nixRefs []spec.Ref
+	byRev := map[string][]string{}
+	for _, r := range refs {
+		if r.Kind == spec.KindNix {
+			nixRefs = append(nixRefs, r)
+			rev := b.cfg.NixRevision(r)
+			byRev[rev] = append(byRev[rev], r.Name)
+		}
+	}
+	if len(nixRefs) == 0 {
+		return nil, nil, nil
+	}
+	evals := map[string]evalResult{} // keyed by rev + "/" + attr
+	t := time.Now()
+	for _, rev := range sortedKeys(byRev) {
+		res, err := b.evalPackages(p, rev, byRev[rev])
+		if err != nil {
+			return nil, nil, err
+		}
+		for a, r := range res {
+			evals[rev+"/"+a] = r
+		}
+	}
+	var roots []string
+	for _, r := range nixRefs {
+		roots = append(roots, evals[b.cfg.NixRevision(r)+"/"+r.Name].Outputs...)
+	}
+	b.stats(func(st *Stats) { st.Eval += time.Since(t) })
+	t = time.Now()
+	storeIndex, err := b.fetchClosure(roots)
+	if err != nil {
+		return nil, nil, err
+	}
+	b.stats(func(st *Stats) { st.Fetch += time.Since(t) })
+	var packages []manifest.Package
+	for _, r := range nixRefs {
+		rev := b.cfg.NixRevision(r)
+		ev := evals[rev+"/"+r.Name]
+		pk := manifest.Package{Attr: r.Name, Nixpkgs: rev, OutPath: ev.Outputs[0], System: p.NixSystem()}
+		for _, o := range ev.Outputs {
+			pk.Bins = append(pk.Bins, storeIndex[path.Base(o)].Bins...)
+		}
+		sort.Strings(pk.Bins)
+		packages = append(packages, pk)
+	}
+	var total int64
+	for _, m := range storeIndex {
+		total += m.Size
+	}
+	b.stats(func(st *Stats) {
+		st.ClosurePaths += len(storeIndex)
+		st.ClosureBytes += total
+	})
+	if n := b.fetchedCount(); n > 0 {
+		b.logf("closure for %s: %d store paths, %s (%d fetched)", p, len(storeIndex), humanSize(total), n)
+	}
+	return storeIndex, packages, nil
+}
+
+func (b *Builder) fetchedCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.fetched
 }
 
 // checkConflicts detects file, binary and environment conflicts between
