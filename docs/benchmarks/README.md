@@ -16,6 +16,7 @@
 | 9 | [剩余路线图评估](09-evaluations/README.md) | Cloud Hypervisor、只读 EROFS 镜像实测后不采用（你确认），内存回收实测无效；路线图完成情况汇总 |
 | 10 | [vz 连接中断](10-vz-connection/README.md) | 宿主机 socket 代理重试并记录连接失败（vz 偶发 EOF 的根因）、连接池存活检查、失败时保存 VM 日志 |
 | — | [总结：优化前后对比](11-final/README.md) | 合并 PR #3 后的完整 benchmark，括号内相对第 0 步基线 |
+| 12 | [warm 加速](12-warm/README.md) | 刷盘按后端区分、上传期间后台写回、解包少系统调用、上传时建视图、qemu 上压缩传输；每项同机 A/B |
 
 复现方法：
 
