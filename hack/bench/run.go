@@ -815,6 +815,7 @@ type runOut struct {
 		SnapshotNote  string `json:"snapshotNote"`
 	} `json:"result"`
 	Total float64 `json:"total"`
+	Warm  warmOut `json:"warm"`
 }
 
 func (b *bench) run(name, bundle string) (*runOut, time.Duration, error) {
@@ -933,6 +934,48 @@ func (b *bench) phaseStart() error {
 		cmp = append(cmp, ms(d))
 	}
 	b.add(g, "compose.cli", "warm compose（CLI 端到端，验收标准 <1s）", "ms", true, cmp...)
+	return b.directStart()
+}
+
+// directStart measures "command to ready" for a user who runs or reloads
+// a closure the guest has never seen, without oar warm first: the CLI
+// uploads what is missing, then the agent builds the view and starts.
+func (b *bench) directStart() error {
+	const g = "4-start"
+	note := func(r *runOut) string {
+		t, w := r.Result.Timings, r.Warm
+		return fmt.Sprintf("CLI 上传 %d 个产物 %.1f MiB（上传 %.0f ms，视图 %.1f ms，写回 %.0f ms）；guest：compose %.1f ms（视图 %.1f ms，cached=%v），create %.0f ms，guest 合计 %.0f ms",
+			w.Uploaded, float64(w.Bytes)/(1<<20), w.Upload/1e6, w.View/1e6, w.Flush/1e6,
+			t.Compose/1e6, t.StoreView/1e6, r.Result.Cached, t.Create/1e6, t.Total/1e6)
+	}
+	// (i) run a bundle whose extra package is not in the guest cache
+	if _, _, err := b.build("direct-run", b.writeConfig("direct-run", cfgOpts{extra: []string{"nix:ruby"}, env: map[string]string{"VARIANT": "direct-run"}})); err != nil {
+		return err
+	}
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		return err
+	}
+	r, wall, err := b.run("direct", b.digests["direct-run"])
+	if err != nil {
+		return err
+	}
+	b.add(g, "direct.run", "直接 run 一个产物不在 guest 缓存的组合（命令到就绪，CLI 墙钟）", "ms", true, ms(wall)).Note = note(r)
+	// (ii) reload to a bundle that adds one new package
+	if _, _, err := b.build("direct-reload", b.writeConfig("direct-reload", cfgOpts{extra: []string{"nix:perl"}, env: map[string]string{"VARIANT": "direct-reload"}})); err != nil {
+		b.rm("direct")
+		return err
+	}
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		b.rm("direct")
+		return err
+	}
+	var rr runOut
+	wall, err = b.oarJSON(&rr, "--bundle", b.digests["direct-reload"], "reload", "--name", "direct")
+	b.rm("direct")
+	if err != nil {
+		return err
+	}
+	b.add(g, "direct.reload", "直接 reload 到多一个新包的组合（命令到就绪，CLI 墙钟）", "ms", true, ms(wall)).Note = note(&rr)
 	return nil
 }
 
