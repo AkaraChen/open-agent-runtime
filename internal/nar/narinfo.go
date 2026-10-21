@@ -17,8 +17,11 @@ type NarInfo struct {
 	Compression string
 	NarHash     string
 	NarSize     int64
-	References  []string // basenames
-	Sigs        []string
+	// FileSize is the size of the compressed file at URL; 0 when the
+	// narinfo does not say (the field is optional).
+	FileSize   int64
+	References []string // basenames
+	Sigs       []string
 }
 
 // ParseNarInfo parses the key/value narinfo format.
@@ -45,6 +48,9 @@ func ParseNarInfo(r io.Reader) (*NarInfo, error) {
 				return nil, fmt.Errorf("narinfo: bad NarSize %q", v)
 			}
 			ni.NarSize = n
+		case "FileSize":
+			// optional and unsigned: a bad value only disables ranged downloads
+			ni.FileSize, _ = strconv.ParseInt(v, 10, 64)
 		case "References":
 			ni.References = strings.Fields(v)
 		case "Sig":

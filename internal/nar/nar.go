@@ -27,6 +27,9 @@ var Epoch = time.Unix(1, 0).UTC()
 type reader struct {
 	r   io.Reader
 	buf [8]byte
+	// copyBuf carries file contents; one per conversion instead of one
+	// per file
+	copyBuf []byte
 }
 
 func (r *reader) u64() (uint64, error) {
@@ -135,8 +138,13 @@ func (r *reader) node(tw *tar.Writer, prefix, rel string, fn func(Entry)) error 
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		if _, err := io.CopyN(tw, r.r, int64(size)); err != nil {
+		if r.copyBuf == nil {
+			r.copyBuf = make([]byte, 64<<10)
+		}
+		if n, err := io.CopyBuffer(tw, io.LimitReader(r.r, int64(size)), r.copyBuf); err != nil {
 			return err
+		} else if n != int64(size) {
+			return io.ErrUnexpectedEOF
 		}
 		if err := r.pad(size); err != nil {
 			return err
