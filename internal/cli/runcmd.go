@@ -183,7 +183,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	var mu sync.Mutex
 	var lastPct int64
 	tuning := warmTuningFor(s.g)
-	compress, writeback := tuning.Compress, tuning.Writeback
+	compress := tuning.Compress
 	var wire atomic.Int64
 	tUpload := time.Now()
 	eg, ectx := errgroup.WithContext(ctx)
@@ -197,7 +197,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 				return fmt.Errorf("artifact %s missing locally (%w); run oar build", p, err)
 			}
 			var pr proto.WarmPutResult
-			if err := s.putWithRetry(ectx, it, p, compress, writeback, &wire, &pr); err != nil {
+			if err := s.putWithRetry(ectx, it, p, tuning, &wire, &pr); err != nil {
 				return fmt.Errorf("warm %s %s: %w", it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), err)
 			}
 			files.Add(int64(pr.Files))
@@ -236,11 +236,20 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 }
 
 // putWithRetry uploads one artifact, retrying transport failures. Errors
-// reported by the agent itself (e.g. checksum mismatch) are not retried.
-func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, compress, writeback bool, wire *atomic.Int64, res *proto.WarmPutResult) error {
-	args := proto.WarmPutArgs{Item: it, Writeback: writeback}
+// reported by the agent itself (e.g. a bad tar) are not retried.
+func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, t warmTuning, wire *atomic.Int64, res *proto.WarmPutResult) error {
+	args := proto.WarmPutArgs{Item: it, Writeback: t.Writeback}
+	if t.InPlace {
+		// the native agent shares the host's filesystem: nothing to send
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		args.Path = abs
+		return s.client.CallBody(ctx, proto.OpWarmPut, args, nil, 0, res, nil)
+	}
 	body := p
-	if compress {
+	if t.Compress {
 		raw, err := os.Stat(p)
 		if err != nil {
 			return err

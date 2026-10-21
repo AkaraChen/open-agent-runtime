@@ -130,7 +130,7 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 			}); err != nil {
 				return err
 			}
-			if _, err := io.Copy(f, tr); err != nil {
+			if err := copyData(f, tr, r, hdr); err != nil {
 				f.Close()
 				return err
 			}
@@ -182,6 +182,26 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 		}
 	}
 	return nil
+}
+
+// copyData writes a regular file's data. When the archive is a file on this
+// disk, the data is copied from it inside the kernel: tr has only read the
+// header, so the archive's position is where the data starts.
+func copyData(f *os.File, tr *tar.Reader, src io.Reader, hdr *tar.Header) error {
+	if tf, ok := src.(*tarFile); ok && hdr.Size > 0 && !isSparse(hdr) {
+		return tf.copyTo(f, tf.pos, hdr.Size)
+	}
+	_, err := io.Copy(f, tr)
+	return err
+}
+
+func isSparse(hdr *tar.Header) bool {
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
 }
 
 func parentOf(rel string) string {

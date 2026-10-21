@@ -8,7 +8,6 @@ package agent
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -170,8 +169,28 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		size := req.BodySize
 		switch a.Encoding {
 		case "":
+			if a.Path != "" {
+				// native: read the builder's tar in place instead of
+				// through the control channel, and copy file data
+				// straight out of it
+				if s.cfg.Mode != "native" {
+					return nil, fmt.Errorf("warm.put by path is only supported by the native backend")
+				}
+				f, err := os.Open(a.Path)
+				if err != nil {
+					return nil, err
+				}
+				defer f.Close()
+				tf, err := newTarFile(f)
+				if err != nil {
+					return nil, err
+				}
+				return s.warmPut(a.Item, a.Writeback, tf, tf.size)
+			}
 		case "zstd":
-			dec, err := zstd.NewReader(body, zstd.WithDecoderConcurrency(1))
+			// two decoders make the stream decode ahead on its own
+			// goroutine, overlapping the extraction (one decodes inline)
+			dec, err := zstd.NewReader(body, zstd.WithDecoderConcurrency(2))
 			if err != nil {
 				return nil, err
 			}
@@ -356,8 +375,19 @@ func (s *Server) warmStatus(a proto.WarmStatusArgs) proto.WarmStatusResult {
 	return res
 }
 
-// warmPut receives a tarball, verifies its sha256 against the key while
-// extracting it into a staging directory, then atomically publishes it.
+// warmPut receives a tarball, extracts it into a staging directory, then
+// atomically publishes it.
+//
+// The body is not hashed against the artifact key. The key is the sha256 the
+// host builder already computed when it content-addressed the tar, and the
+// sender is the host process that controls this guest: it picks the artifact
+// by that key and is trusted with the whole machine anyway, so a mismatch
+// could only mean bit rot in the host's artifact cache. Transport damage is
+// covered below this layer (vsock and TCP checksum their payload, and zstd
+// frames carry their own checksum, verified by the decoder), and truncation
+// by the size check here and the tar's own header checksums. Hashing in the
+// guest cost one sha256 pass over every byte on the extraction goroutine,
+// which dominates under TCG emulation.
 func (s *Server) warmPut(it proto.WarmItem, writeback bool, body io.Reader, size int64) (*proto.WarmPutResult, error) {
 	start := time.Now()
 	res := &proto.WarmPutResult{}
@@ -374,16 +404,14 @@ func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, 
 	if err != nil {
 		return err
 	}
-	keyHex := it.Key
-	if _, h, ok := strings.Cut(it.Key, ":"); ok {
-		keyHex = h
-	}
 	muAny, _ := s.warmMu.LoadOrStore(final, &sync.Mutex{})
 	mu := muAny.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
 	if _, err := os.Lstat(final); err == nil {
-		_, _ = io.Copy(io.Discard, body)
+		if _, ok := body.(*tarFile); !ok {
+			_, _ = io.Copy(io.Discard, body)
+		}
 		return nil
 	}
 	stage, err := os.MkdirTemp(s.layout.Tmp(), "warm-")
@@ -391,9 +419,14 @@ func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, 
 		return err
 	}
 	defer os.RemoveAll(stage)
-	h := sha256.New()
-	var cr countReader
-	cr.r = io.TeeReader(body, h)
+	cr := countReader{r: body}
+	// a tar file on the agent's own disk is read in place (it is whole by
+	// construction, so there is no body to count)
+	var tarSrc io.Reader = &cr
+	tf, direct := body.(*tarFile)
+	if direct {
+		tarSrc = tf
+	}
 	extractRoot := stage
 	if it.Kind != proto.KindStore {
 		extractRoot = filepath.Join(stage, "x", leafName(it.Kind))
@@ -404,19 +437,18 @@ func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, 
 	if writeback {
 		s.kickWriteback()
 	}
-	files, err := extractTar(&cr, extractRoot)
+	files, err := extractTar(tarSrc, extractRoot)
 	if err != nil {
 		return fmt.Errorf("extract %s %s: %w", it.Kind, it.Key, err)
 	}
 	res.Files, res.Bytes = files, size
-	if _, err := io.Copy(io.Discard, &cr); err != nil {
-		return err
-	}
-	if size > 0 && cr.n != size {
-		return fmt.Errorf("short body for %s: got %d of %d bytes", it.Key, cr.n, size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != keyHex {
-		return fmt.Errorf("checksum mismatch for %s %s: got sha256:%s", it.Kind, it.Name, got)
+	if !direct {
+		if _, err := io.Copy(io.Discard, &cr); err != nil {
+			return err
+		}
+		if size > 0 && cr.n != size {
+			return fmt.Errorf("short body for %s: got %d of %d bytes", it.Key, cr.n, size)
+		}
 	}
 	src := filepath.Join(stage, "x")
 	if it.Kind == proto.KindStore {
