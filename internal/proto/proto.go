@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -158,9 +159,10 @@ func isClosed(err error) bool {
 	return err != nil && (errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "deadline") || errors.Is(err, io.EOF))
 }
 
-// Stream opens a bidirectional byte stream: it sends the request header,
-// waits for a successful response, and returns a connection carrying the
-// raw stream (port forwarding).
+// Stream opens a bidirectional byte stream (port forwarding). It does not
+// wait for the agent's response: the caller can write right away, which
+// saves a round trip per connection on slow channels. The response header
+// is checked on the first Read; a refused stream fails that Read.
 func (c *Client) Stream(ctx context.Context, op string, args any) (net.Conn, error) {
 	conn, err := c.Dial(ctx)
 	if err != nil {
@@ -180,34 +182,39 @@ func (c *Client) Stream(ctx context.Context, op string, args any) (net.Conn, err
 		conn.Close()
 		return nil, err
 	}
-	r := bufio.NewReader(conn)
-	line, err := r.ReadBytes('\n')
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	var resp Response
-	if err := json.Unmarshal(line, &resp); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	if !resp.OK {
-		conn.Close()
-		return nil, &RemoteError{Msg: resp.Error}
-	}
-	return &bufferedConn{Conn: conn, r: r}, nil
+	return &streamConn{Conn: conn, r: bufio.NewReader(conn)}, nil
 }
 
-type bufferedConn struct {
+type streamConn struct {
 	net.Conn
-	r *bufio.Reader
+	r    *bufio.Reader
+	once sync.Once
+	err  error // response error, set by the first Read
 }
 
-func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+func (s *streamConn) Read(p []byte) (int, error) {
+	s.once.Do(func() {
+		line, err := s.r.ReadBytes('\n')
+		if err != nil {
+			s.err = err
+			return
+		}
+		var resp Response
+		if err := json.Unmarshal(line, &resp); err != nil {
+			s.err = err
+		} else if !resp.OK {
+			s.err = &RemoteError{Msg: resp.Error}
+		}
+	})
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.r.Read(p)
+}
 
 // CloseWrite half-closes the underlying connection when supported.
-func (b *bufferedConn) CloseWrite() error {
-	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+func (s *streamConn) CloseWrite() error {
+	if cw, ok := s.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
 	return nil
@@ -326,4 +333,37 @@ func Decode(req *Request, v any) error {
 		return nil
 	}
 	return json.Unmarshal(req.Args, v)
+}
+
+// pipeBufSize is Pipe's copy buffer for non-TCP connections (vsock, the
+// control channel). On vsock loopback 256 KiB doubled throughput over
+// io.Copy's 32 KiB; 1 MiB was slower again.
+const pipeBufSize = 256 << 10
+
+var pipeBufs = sync.Pool{New: func() any { b := make([]byte, pipeBufSize); return &b }}
+
+// Pipe copies a <-> b until both directions finish, then closes both. When
+// one source ends, the other side is half-closed if it supports that.
+func Pipe(a, b net.Conn) {
+	done := make(chan struct{})
+	go func() { copyHalf(a, b); close(done) }()
+	copyHalf(b, a)
+	<-done
+	a.Close()
+	b.Close()
+}
+
+func copyHalf(dst, src net.Conn) {
+	_, tcpSrc := src.(*net.TCPConn)
+	_, tcpDst := dst.(*net.TCPConn)
+	if tcpSrc && tcpDst {
+		io.Copy(dst, src) // splice(2)
+	} else {
+		bp := pipeBufs.Get().(*[]byte)
+		io.CopyBuffer(struct{ io.Writer }{dst}, struct{ io.Reader }{src}, *bp)
+		pipeBufs.Put(bp)
+	}
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
 }

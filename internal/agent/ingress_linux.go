@@ -39,6 +39,19 @@ type ingress struct {
 type ingresses struct {
 	mu sync.Mutex
 	m  map[string]map[string]*ingress // container -> port name
+	// ver changes with every route change; changed is closed then
+	// (long-polling ingress.list waits on it)
+	ver     uint64
+	changed chan struct{}
+}
+
+// bumpLocked records a change and wakes waiting ingress.list calls.
+func (ig *ingresses) bumpLocked() {
+	ig.ver++
+	if ig.changed != nil {
+		close(ig.changed)
+		ig.changed = nil
+	}
 }
 
 func (s *Server) ingressAddr() string {
@@ -68,6 +81,7 @@ func (s *Server) route(in *instance) ([]*ingressTarget, error) {
 	ig := &s.ing
 	ig.mu.Lock()
 	defer ig.mu.Unlock()
+	defer ig.bumpLocked()
 	if ig.m == nil {
 		ig.m = map[string]map[string]*ingress{}
 	}
@@ -119,6 +133,7 @@ func (s *Server) unroute(container, id string) {
 	ig := &s.ing
 	ig.mu.Lock()
 	defer ig.mu.Unlock()
+	defer ig.bumpLocked()
 	for name, g := range ig.m[container] {
 		if t := g.target.Load(); t == nil || t.instance == id {
 			g.ln.Close()
@@ -131,6 +146,7 @@ func (s *Server) closeAllIngress() {
 	ig := &s.ing
 	ig.mu.Lock()
 	defer ig.mu.Unlock()
+	defer ig.bumpLocked()
 	for _, ports := range ig.m {
 		for _, g := range ports {
 			g.ln.Close()
@@ -176,36 +192,16 @@ func (g *ingress) serve() {
 				c.Close()
 				return
 			}
-			pipe(c, b)
+			proto.Pipe(c, b)
 		}()
 	}
-}
-
-// pipe copies both directions and closes both connections.
-func pipe(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		} else {
-			dst.Close()
-		}
-		done <- struct{}{}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	<-done
-	<-done
-	a.Close()
-	b.Close()
 }
 
 func (s *Server) ingressList() proto.IngressList {
 	ig := &s.ing
 	ig.mu.Lock()
 	defer ig.mu.Unlock()
-	res := proto.IngressList{Ingresses: []proto.Ingress{}}
+	res := proto.IngressList{Version: ig.ver, Ingresses: []proto.Ingress{}}
 	for container, ports := range ig.m {
 		for name, g := range ports {
 			e := proto.Ingress{Container: container, Name: name, Port: g.port}
@@ -236,13 +232,59 @@ func interfaceIPv4(name string) string {
 	return ""
 }
 
+// ingressWait is ingressList as a long poll (see proto.IngressListArgs).
+func (s *Server) ingressWait(ctx context.Context, a proto.IngressListArgs) proto.IngressList {
+	ig := &s.ing
+	ig.mu.Lock()
+	if a.Wait <= 0 || ig.ver != a.Version {
+		ig.mu.Unlock()
+		return s.ingressList()
+	}
+	if ig.changed == nil {
+		ig.changed = make(chan struct{})
+	}
+	changed := ig.changed
+	ig.mu.Unlock()
+	t := time.NewTimer(min(a.Wait, time.Minute))
+	defer t.Stop()
+	select {
+	case <-changed:
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return s.ingressList()
+}
+
+// ingressTarget returns the current target of the ingress on port, if any.
+func (s *Server) ingressTarget(port int) *ingressTarget {
+	ig := &s.ing
+	ig.mu.Lock()
+	defer ig.mu.Unlock()
+	for _, ports := range ig.m {
+		for _, g := range ports {
+			if g.port == port {
+				return g.target.Load()
+			}
+		}
+	}
+	return nil
+}
+
 // handleDial connects the request stream to a TCP port inside the guest
-// network (host-side port forwarding).
+// network (host-side port forwarding). An ingress port is dialed at its
+// current instance directly instead of through the ingress listener, which
+// saves a hop; the connection still counts for draining.
 func (s *Server) handleDial(a proto.DialArgs, rs *proto.ResponseStream) error {
 	if a.Port < 1 || a.Port > 65535 {
 		return fmt.Errorf("invalid port %d", a.Port)
 	}
-	b, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", a.Port), 2*time.Second)
+	addr := fmt.Sprintf("127.0.0.1:%d", a.Port)
+	if t := s.ingressTarget(a.Port); t != nil {
+		t.active.Add(1)
+		defer t.active.Add(-1)
+		addr = t.addr
+	}
+	b, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return err
 	}
@@ -251,24 +293,22 @@ func (s *Server) handleDial(a proto.DialArgs, rs *proto.ResponseStream) error {
 		b.Close()
 		return err
 	}
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(b, r)
-		if cw, ok := b.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(conn, b)
-		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	<-done
-	<-done
-	b.Close()
+	proto.Pipe(&readerConn{conn, r}, b)
+	return nil
+}
+
+// readerConn reads through r, which holds bytes already buffered from Conn.
+type readerConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func (c *readerConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
 	return nil
 }
 

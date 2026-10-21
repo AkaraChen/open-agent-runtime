@@ -63,6 +63,11 @@ type Server struct {
 	runcVerOnce sync.Once
 	runcVer     string
 	warmMu      sync.Map // per-key locks for warm.put
+	// private gives Root private propagation before the first mount
+	// below it (see makePrivate); privateBind is set when that
+	// bind-mounted Root onto itself
+	private     sync.Once
+	privateBind bool
 }
 
 // New prepares the state directories.
@@ -84,6 +89,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("unknown store view mode %q", mode)
 	}
 	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root, StoreMode: mode}, booted: time.Now()}
+	// a fresh version after a restart, so a waiting host never mistakes
+	// the new list for the one it already has
+	s.ing.ver = uint64(s.booted.UnixNano())
 	for _, d := range []string{cfg.Root, s.layout.Tmp(), s.layout.InstancesDir(), s.layout.StoreLayers(), cfg.Runc.Root,
 		filepath.Join(cfg.Root, "bases"), filepath.Join(cfg.Root, "components"), filepath.Join(cfg.Root, "bundles")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -164,7 +172,11 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		return nil, s.handleDial(a, rs)
 	case proto.OpIngress:
-		return s.ingressList(), nil
+		var a proto.IngressListArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return s.ingressWait(ctx, a), nil
 	case proto.OpPrepare:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -219,6 +231,9 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		var a proto.StatsArgs
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
+		}
+		if a.Sync {
+			unix.Sync()
 		}
 		if a.DropCaches {
 			if s.cfg.Mode != "vm" {
@@ -413,6 +428,7 @@ type instance struct {
 	Ports       map[string]int  `json:"ports,omitempty"`
 	PublicPorts []manifest.Port `json:"publicPorts,omitempty"`
 	dir         string
+	viewTime    time.Duration // ensureStoreView in createInstance (timings)
 }
 
 func (s *Server) instDir(id string) string { return filepath.Join(s.layout.InstancesDir(), id) }
@@ -535,6 +551,7 @@ func (s *Server) run(ctx context.Context, a proto.RunArgs, reload bool) (*proto.
 		Strategy:     a.Strategy,
 		Timings: proto.Timings{
 			Compose:     tCompose.Sub(t0),
+			StoreView:   in.viewTime,
 			Instantiate: tInst.Sub(tCompose),
 			Create:      tCreate.Sub(tInst),
 		},
@@ -668,7 +685,12 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	if err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
+	tView := time.Now()
+	if err := s.ensureStoreView(res.Bundle); err != nil {
+		return nil, false, time.Time{}, time.Time{}, err
+	}
 	tCompose := time.Now()
+	viewTime := tCompose.Sub(tView)
 	ports, err := allocatePorts(a.Lock.Ports)
 	if err != nil {
 		return nil, false, tCompose, time.Time{}, err
@@ -680,6 +702,7 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	env = append(env, snapshotEnv(a.Lock)...)
 	in, err := s.instantiate(name, res.Bundle, env, func(in *instance) {
 		in.Ports, in.PublicPorts = ports, a.Lock.Ports
+		in.viewTime = viewTime
 	})
 	if err != nil {
 		return nil, false, tCompose, time.Time{}, err
@@ -903,6 +926,7 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 		os.RemoveAll(in.dir)
 		return nil, err
 	}
+	s.makeRootPrivate()
 	if err := mountOverlay(filepath.Join(in.dir, "rootfs"), b.Layers, filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work")); err != nil {
 		os.RemoveAll(in.dir)
 		return nil, fmt.Errorf("mount overlay: %w", err)
@@ -1113,6 +1137,10 @@ func (s *Server) StopAll(ctx context.Context) {
 	}
 	s.cleanups.Wait()
 	s.unmountStoreGroups()
+	s.makeRootPrivate() // no later call binds it again
+	if s.privateBind {
+		unix.Unmount(s.cfg.Root, unix.MNT_DETACH)
+	}
 }
 
 // SetShutdown installs the shutdown hook.

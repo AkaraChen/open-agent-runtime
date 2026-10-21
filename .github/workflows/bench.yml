@@ -9,6 +9,18 @@ on:
       ab_store_view:
         description: also run the benchmark on the same runner with OAR_STORE_VIEW set to this (A/B)
         default: ""
+      base:
+        description: >-
+          A/B mode: also benchmark this commit (full sha, tag or branch) on
+          the same runners, interleaved with this one, using this harness
+          with -no-ingress; empty runs the normal benchmark
+        default: ""
+      rounds:
+        description: A/B mode, benchmark runs per side
+        default: "2"
+      backends:
+        description: A/B mode, comma separated backends to run
+        default: native,kvm,vz,qemu
 
 env:
   GO_VERSION: "1.24"
@@ -40,8 +52,38 @@ jobs:
           path: guest/out/${{ matrix.arch }}/
           retention-days: 3
 
+  guest-base:
+    name: base guest image (${{ matrix.arch }})
+    if: github.event.inputs.base != ''
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.base }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: kernel cache
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: guest/out/${{ matrix.arch }}/kernel*
+          key: kernel-${{ matrix.arch }}-${{ hashFiles('guest/kernel*.config', 'guest/build-kernel.sh', 'guest/Dockerfile', 'guest/build.sh') }}
+      - if: steps.kcache.outputs.cache-hit != 'true'
+        run: guest/build.sh ${{ matrix.arch }} kernel
+      - run: guest/build.sh ${{ matrix.arch }} initramfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}-base
+          path: guest/out/${{ matrix.arch }}/
+          retention-days: 3
+
   bench:
     name: bench ${{ matrix.backend }} (${{ matrix.os }})
+    if: github.event.inputs.base == ''
     needs: guest
     strategy:
       fail-fast: false
@@ -103,3 +145,90 @@ jobs:
           path: |
             results-${{ matrix.label }}*.json
             results-${{ matrix.label }}*.log
+
+  # A/B: base and head on the same runner, interleaved (base head head base
+  # ...), so runner variance cancels out
+  bench-ab:
+    name: bench A/B ${{ matrix.backend }} (${{ matrix.os }})
+    if: github.event.inputs.base != ''
+    needs: [guest, guest-base]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64, backend: native, label: native }
+          - { os: ubuntu-latest, arch: amd64, backend: kvm, label: kvm }
+          - { os: macos-15-intel, arch: amd64, backend: vz, label: vz-intel }
+          - { os: macos-15, arch: arm64, backend: qemu, label: qemu-arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    steps:
+      - id: sel
+        run: case ",${{ github.event.inputs.backends }}," in *",${{ matrix.backend }},"*) echo run=true >> "$GITHUB_OUTPUT" ;; esac
+      - if: steps.sel.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: head
+      - if: steps.sel.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: base
+          ref: ${{ github.event.inputs.base }}
+      - if: steps.sel.outputs.run == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: head/go.sum
+      - if: steps.sel.outputs.run == 'true' && (runner.os == 'macOS')
+        uses: cachix/install-nix-action@v31
+      - if: steps.sel.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}
+          path: head/guest/out/${{ matrix.arch }}
+      - if: steps.sel.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-${{ matrix.arch }}-base
+          path: base/guest/out/${{ matrix.arch }}
+      - if: steps.sel.outputs.run == 'true' && (matrix.backend == 'kvm')
+        name: enable kvm and vhost-vsock
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo modprobe vhost_vsock && sudo chmod 666 /dev/vhost-vsock
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - if: steps.sel.outputs.run == 'true' && (matrix.backend == 'qemu')
+        run: brew install qemu
+      - if: steps.sel.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.sel.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: head/rust/iets-ffi
+      - if: steps.sel.outputs.run == 'true'
+        run: (cd head && hack/build.sh) && (cd base && hack/build.sh)
+      - if: steps.sel.outputs.run == 'true'
+        name: benchmark (interleaved)
+        working-directory: head
+        run: |
+          mkdir -p ../results
+          for i in $(seq 1 ${{ github.event.inputs.rounds }}); do
+            order="base head"
+            [ $((i % 2)) = 0 ] && order="head base"
+            for side in $order; do
+              echo "::group::round $i: $side"
+              OAR_GUEST_DIR=$GITHUB_WORKSPACE/$side/guest/out go run ./hack/bench run \
+                -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
+                -profile ${{ github.event.inputs.profile || 'quick' }} -no-ingress \
+                -oar $GITHUB_WORKSPACE/$side/bin/oar \
+                -out ../results/results-${{ matrix.label }}-$side-$i.json -- --cpus 2 --memory 4096 \
+                || echo "::warning::$side round $i failed"
+              echo "::endgroup::"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: steps.sel.outputs.run == 'true' && (always())
+        with:
+          name: ab-${{ matrix.label }}
+          path: results/

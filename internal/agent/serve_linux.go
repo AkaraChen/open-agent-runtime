@@ -29,7 +29,11 @@ func ListenSpec(spec string, socketUID, socketGID int) (net.Listener, error) {
 		if err != nil {
 			return nil, err
 		}
-		return vsock.Listen(uint32(port), nil)
+		l, err := vsock.Listen(uint32(port), nil)
+		if err != nil {
+			return nil, err
+		}
+		return proto.TunedVsockListener{Listener: l}, nil
 	case "unix":
 		if err := os.MkdirAll(filepath.Dir(addr), 0o755); err != nil {
 			return nil, err

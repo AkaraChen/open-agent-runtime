@@ -125,6 +125,9 @@ type warmStats struct {
 	Duration time.Duration `json:"duration"`
 	// GuestTime is the summed agent-side extraction time.
 	GuestTime time.Duration `json:"guestTime"`
+	// Status and Precompose are the warm.status and compose round trips.
+	Status     time.Duration `json:"status"`
+	Precompose time.Duration `json:"precompose,omitempty"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -142,11 +145,13 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	if err := s.client.Call(ctx, proto.OpWarmStatus, proto.WarmStatusArgs{Items: items}, &st); err != nil {
 		return nil, err
 	}
-	stats := &warmStats{Total: len(items), Uploaded: len(st.Missing)}
+	stats := &warmStats{Total: len(items), Uploaded: len(st.Missing), Status: time.Since(start)}
 	if len(st.Missing) == 0 {
 		var err error
 		if precompose {
+			t := time.Now()
 			err = s.precompose(ctx)
+			stats.Precompose = time.Since(t)
 		}
 		stats.Duration = time.Since(start)
 		return stats, err
@@ -197,9 +202,11 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 		return nil, err
 	}
 	if precompose {
+		t := time.Now()
 		if err := s.precompose(ctx); err != nil {
 			return nil, err
 		}
+		stats.Precompose = time.Since(t)
 	}
 	stats.Bytes = sent.Load()
 	stats.Files = files.Load()

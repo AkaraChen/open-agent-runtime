@@ -49,7 +49,10 @@ func (r *Runc) run(ctx context.Context, args ...string) ([]byte, error) {
 // them. Otherwise the container writes the log file directly, which avoids
 // spawning a relay per container.
 func (r *Runc) Create(ctx context.Context, id, bundle, logPath string, pipes bool) error {
-	args := []string{"create", "--bundle", bundle, "--pid-file", bundle + "/pid"}
+	// no --pid-file: runc writes it with O_SYNC, which waits for an ext4
+	// journal commit; after a warm that commit carries the metadata of
+	// every extracted file and took up to 3 s (the pid comes from state)
+	args := []string{"create", "--bundle", bundle}
 	if r.NoPivot {
 		args = append(args, "--no-pivot")
 	}

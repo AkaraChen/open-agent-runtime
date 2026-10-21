@@ -215,15 +215,79 @@ func mountOverlay(target string, lowers []string, upper, work string) error {
 	return unix.MoveMount(mfd, "", unix.AT_FDCWD, target, unix.MOVE_MOUNT_F_EMPTY_PATH)
 }
 
+// makeRootPrivate runs makePrivate on Root once, before the first mount
+// below it rather than at agent start (agent reachability does not wait).
+func (s *Server) makeRootPrivate() {
+	s.private.Do(func() { s.privateBind = makePrivate(s.cfg.Root) })
+}
+
+// makePrivate gives dir private mount propagation, bind-mounting it onto
+// itself first if it is not a mount point, and reports whether it did that.
+// Otherwise every store view and instance overlay mounted below it is
+// copied into each mount namespace that is a peer or slave of the parent
+// mount (on a systemd host: every service with PrivateTmp or
+// ProtectSystem), which multiplies the cost of each mount and unmount and
+// leaks the mounts into those namespaces. Best effort: needs
+// CAP_SYS_ADMIN.
+func makePrivate(dir string) bool {
+	bound := false
+	if !isMountRoot(dir) {
+		if unix.Mount(dir, dir, "", unix.MS_BIND, "") != nil {
+			return false
+		}
+		bound = true
+	}
+	unix.Mount("", dir, "", unix.MS_REC|unix.MS_PRIVATE, "")
+	return bound
+}
+
+// isMountRoot reports whether path is the root of a mount, with one statx
+// call (reading mountinfo costs ~0.5 ms per read on a host with a few
+// hundred mounts); before Linux 5.8 it falls back to mountinfo.
+func isMountRoot(path string) bool {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, 0, &st); err != nil {
+		return false
+	}
+	if st.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT != 0 {
+		return st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real // mountinfo shows resolved paths
+	}
+	return isMountpoint(path)
+}
+
+// isMountpoint reports whether dir is a mount point.
+func isMountpoint(dir string) bool {
+	found := false
+	eachMountpoint(func(mp string) {
+		if mp == dir {
+			found = true
+		}
+	})
+	return found
+}
+
 // mountpointsUnder returns the mount points below dir.
 func mountpointsUnder(dir string) (map[string]bool, error) {
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
 	prefix := filepath.Clean(dir) + "/"
 	out := map[string]bool{}
+	err := eachMountpoint(func(mp string) {
+		if strings.HasPrefix(mp, prefix) {
+			out[mp] = true
+		}
+	})
+	return out, err
+}
+
+// eachMountpoint calls fn with every mount point of this namespace.
+func eachMountpoint(fn func(string)) error {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -231,12 +295,9 @@ func mountpointsUnder(dir string) (map[string]bool, error) {
 		if len(fields) < 5 {
 			continue
 		}
-		mp := unescapeMountinfo(fields[4])
-		if strings.HasPrefix(mp, prefix) {
-			out[mp] = true
-		}
+		fn(unescapeMountinfo(fields[4]))
 	}
-	return out, sc.Err()
+	return sc.Err()
 }
 
 // unescapeMountinfo decodes the octal escapes (\040 etc.) used in mountinfo.

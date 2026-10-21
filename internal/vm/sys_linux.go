@@ -9,6 +9,8 @@ import (
 	"syscall"
 
 	"github.com/mdlayher/vsock"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
 func vsockAvailable() bool {
@@ -28,6 +30,7 @@ func dialVsock(cid, port uint32) (net.Conn, error) {
 	if err != nil {
 		return nil, err // not a typed nil *vsock.Conn inside net.Conn
 	}
+	proto.TuneVsock(c)
 	return c, nil
 }
 

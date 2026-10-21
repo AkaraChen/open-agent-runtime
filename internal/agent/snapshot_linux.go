@@ -186,7 +186,7 @@ func (s *Server) restoreInstance(ctx context.Context, name string, a proto.RunAr
 	work := filepath.Join(in.dir, "criu")
 	os.MkdirAll(work, 0o700)
 	args := []string{"restore", "--image-path", filepath.Join(snap, "img"), "--work-path", work,
-		"--bundle", in.dir, "--detach", "--pid-file", filepath.Join(in.dir, "pid")}
+		"--bundle", in.dir, "--detach"}
 	if s.cfg.Runc.NoPivot {
 		args = append(args, "--no-pivot")
 	}

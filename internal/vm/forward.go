@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
+
+// ingressWait is how long one ingress.list long poll may wait in the agent.
+const ingressWait = 25 * time.Second
 
 // hostForwarder is a machine whose VMM can forward a host loopback port to
 // the same guest port itself (QEMU user networking): connections then skip
@@ -26,44 +30,49 @@ type guestNetwork interface {
 	GuestNetwork() bool
 }
 
-// forwardIngress mirrors the guest's ingress ports on the host loopback.
-// Depending on the backend a port is forwarded by the VMM, proxied to the
-// guest's address, or tunnelled through the control channel (dial op).
-func forwardIngress(ctx context.Context, guest *proto.Client, m Machine, log io.Writer) {
-	var mu sync.Mutex
+// ForwardIngress mirrors the guest's ingress ports on host (an IP, normally
+// 127.0.0.1), tunnelling each connection through the control channel.
+func ForwardIngress(ctx context.Context, guest *proto.Client, host string, log io.Writer) {
+	forwardIngress(ctx, guest, nil, host, log)
+}
+
+// forwardIngress mirrors the guest's ingress ports on host. Depending on
+// the machine a port is forwarded by the VMM, proxied to the guest's
+// address, or tunnelled through the control channel (dial op). It
+// long-polls the agent's ingress list, so a new port is reachable as soon
+// as it is routed.
+func forwardIngress(ctx context.Context, guest *proto.Client, m Machine, host string, log io.Writer) {
 	listeners := map[int]net.Listener{}
 	vmm := map[int]bool{} // ports forwarded by the VMM
-	var guestIP string    // guarded by mu
+	var mu sync.Mutex
+	var guestIP string // guarded by mu
 	hf, _ := m.(hostForwarder)
 	gn, _ := m.(guestNetwork)
 	direct := gn != nil && gn.GuestNetwork()
 	defer func() {
-		mu.Lock()
 		for _, l := range listeners {
 			l.Close()
 		}
-		mu.Unlock()
 		for port := range vmm {
 			hf.HostUnforward(port)
 		}
 	}()
 	addr := func() string { mu.Lock(); defer mu.Unlock(); return guestIP }
+	var ver uint64
 	for {
 		var list proto.IngressList
-		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := guest.Call(cctx, proto.OpIngress, nil, &list)
+		cctx, cancel := context.WithTimeout(ctx, ingressWait+5*time.Second)
+		err := guest.Call(cctx, proto.OpIngress, proto.IngressListArgs{Version: ver, Wait: ingressWait}, &list)
 		cancel()
 		if err == nil {
+			ver = list.Version
 			mu.Lock()
 			guestIP = list.GuestIP
 			mu.Unlock()
 			want := map[int]bool{}
 			for _, ig := range list.Ingresses {
 				want[ig.Port] = true
-				mu.Lock()
-				_, ok := listeners[ig.Port]
-				mu.Unlock()
-				if ok || vmm[ig.Port] {
+				if _, ok := listeners[ig.Port]; ok || vmm[ig.Port] {
 					continue
 				}
 				if hf != nil {
@@ -75,33 +84,26 @@ func forwardIngress(ctx context.Context, guest *proto.Client, m Machine, log io.
 						fmt.Fprintf(log, "VMM forward of port %d: %v; using the control channel\n", ig.Port, err)
 					}
 				}
-				l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", ig.Port))
+				l, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(ig.Port)))
 				if err != nil {
 					fmt.Fprintf(log, "forward port %d: %v\n", ig.Port, err)
 					continue
 				}
 				via := "control channel"
-				if direct {
-					via = "guest network, control channel as fallback"
-				}
-				fmt.Fprintf(log, "forwarding 127.0.0.1:%d -> guest :%d (%s/%s) via %s\n", ig.Port, ig.Port, ig.Container, ig.Name, via)
-				mu.Lock()
-				listeners[ig.Port] = l
-				mu.Unlock()
 				var dialGuest func() string
 				if direct {
-					dialGuest = addr
+					via, dialGuest = "guest network, control channel as fallback", addr
 				}
+				fmt.Fprintf(log, "forwarding %s:%d -> guest :%d (%s/%s) via %s\n", host, ig.Port, ig.Port, ig.Container, ig.Name, via)
+				listeners[ig.Port] = l
 				go acceptForward(ctx, l, guest, ig.Port, dialGuest)
 			}
-			mu.Lock()
 			for port, l := range listeners {
 				if !want[port] {
 					l.Close()
 					delete(listeners, port)
 				}
 			}
-			mu.Unlock()
 			for port := range vmm {
 				if !want[port] {
 					hf.HostUnforward(port)
@@ -109,10 +111,16 @@ func forwardIngress(ctx context.Context, guest *proto.Client, m Machine, log io.
 				}
 			}
 		}
+		// errors, and agents without long polling (version 0), answer
+		// at once: poll them at a fixed interval
+		wait := time.Duration(0)
+		if err != nil || list.Version == 0 {
+			wait = 500 * time.Millisecond
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(wait):
 		}
 	}
 }
@@ -131,7 +139,7 @@ func acceptForward(ctx context.Context, l net.Listener, guest *proto.Client, por
 			var g net.Conn
 			if guestAddr != nil {
 				if ip := guestAddr(); ip != "" {
-					g, _ = net.DialTimeout("tcp", net.JoinHostPort(ip, fmt.Sprint(port)), time.Second)
+					g, _ = net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), time.Second)
 				}
 			}
 			if g == nil {
@@ -140,12 +148,7 @@ func acceptForward(ctx context.Context, l net.Listener, guest *proto.Client, por
 					return
 				}
 			}
-			defer g.Close()
-			done := make(chan struct{}, 2)
-			go func() { io.Copy(g, c); closeWrite(g); done <- struct{}{} }()
-			go func() { io.Copy(c, g); closeWrite(c); done <- struct{}{} }()
-			<-done
-			<-done
+			proto.Pipe(c, g)
 		}()
 	}
 }

@@ -46,6 +46,9 @@ type bench struct {
 	res      *Result
 	digests  map[string]string
 	configs  []string
+	// noIngress skips what needs the ingress proxy (process.ports,
+	// prepare --start), so builds from before it can be compared (A/B)
+	noIngress bool
 }
 
 func runMain(args []string) error {
@@ -58,6 +61,7 @@ func runMain(args []string) error {
 	arch := fs.String("arch", runtime.GOARCH, "guest architecture")
 	keep := fs.Bool("keep", false, "keep artifacts and configs (debugging)")
 	only := fs.String("only", "", "comma separated phases to run (debugging)")
+	noIngress := fs.Bool("no-ingress", false, "skip scenarios that need the ingress proxy (to compare with older builds)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,8 +70,8 @@ func runMain(args []string) error {
 	b := &bench{
 		oar: oarAbs, backend: *backend, arch: *arch, platform: "linux/" + *arch,
 		exDir: exAbs, vmArgs: fs.Args(), quick: *profile != "full",
-		digests: map[string]string{},
-		res:     &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
+		digests: map[string]string{}, noIngress: *noIngress,
+		res: &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
 	}
 	b.res.Host = hostDesc()
 	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
@@ -223,10 +227,14 @@ func (b *bench) client() *proto.Client { return vm.Client(vm.Dir(b.home, "defaul
 func (b *bench) stats() (proto.StatsResult, error) { return b.statsOpt(false) }
 
 func (b *bench) statsOpt(drop bool) (proto.StatsResult, error) {
+	return b.statsArgs(proto.StatsArgs{DropCaches: drop})
+}
+
+func (b *bench) statsArgs(a proto.StatsArgs) (proto.StatsResult, error) {
 	var st proto.StatsResult
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	err := b.client().Call(ctx, proto.OpStats, proto.StatsArgs{DropCaches: drop}, &st)
+	err := b.client().Call(ctx, proto.OpStats, a, &st)
 	return st, err
 }
 
@@ -374,6 +382,13 @@ type buildOut struct {
 	} `json:"stats"`
 }
 
+// buildSplit describes where a build's wall time went.
+func buildSplit(o *buildOut, wall time.Duration) string {
+	st := o.Stats
+	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、求值 %.0f、下载 %.0f、组件 %.0f），其余（CLI 进程、配置、锁文件）%.0f ms",
+		st.Total/1e6, st.Base/1e6, st.Eval/1e6, st.Fetch/1e6, st.Components/1e6, ms(wall)-st.Total/1e6)
+}
+
 func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
 	var out buildOut
 	d, err := b.oarJSON(&out, "-f", cfg, "build", "--platform", b.platform)
@@ -458,16 +473,30 @@ func (b *bench) phaseBuild() error {
 	b.add(g, "closure.size", "闭包大小（tar）", "MiB", true, float64(s.ClosureBytes)/(1<<20))
 
 	// no-op rebuild
-	_, wall, err = b.build("a", a)
+	on, wall, err := b.build("a", a)
 	if err == nil {
-		b.add(g, "noop", "无变化重建", "ms", true, ms(wall))
+		b.add(g, "noop", "无变化重建", "ms", true, ms(wall)).Note = buildSplit(on, wall)
 	}
-	// incremental: drop a component
-	nogit := b.writeConfig("nogit", cfgOpts{drop: "nix:git", env: map[string]string{"VARIANT": "nogit"}})
-	o2, wall, err := b.build("nogit", nogit)
-	if err == nil {
-		b.add(g, "incr.remove", "增量构建：删除一个组件（nix:git）", "ms", true, ms(wall)).Note =
-			fmt.Sprintf("下载 %d 个 path，求值 %d 个属性", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr)
+	// incremental: drop a component; three combos (they differ only in an
+	// env var) so one noisy sample does not decide
+	var removes []float64
+	var splits []string
+	var o2 *buildOut
+	for _, name := range []string{"nogit", "nogit-2", "nogit-3"} {
+		cfg := b.writeConfig(name, cfgOpts{drop: "nix:git", env: map[string]string{"VARIANT": name}})
+		o, wall, err := b.build(name, cfg)
+		if err != nil {
+			break
+		}
+		if o2 == nil {
+			o2 = o
+		}
+		removes = append(removes, ms(wall))
+		splits = append(splits, buildSplit(o, wall))
+	}
+	if o2 != nil {
+		b.add(g, "incr.remove", "增量构建：删除一个组件（nix:git，3 个组合）", "ms", true, removes...).Note =
+			fmt.Sprintf("第一个：下载 %d 个 path，求值 %d 个属性；%s", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr, strings.Join(splits, " | "))
 	}
 	// add a package that was never evaluated
 	hello := b.writeConfig("hello", cfgOpts{extra: []string{"nix:hello"}, env: map[string]string{"VARIANT": "hello"}})
@@ -523,12 +552,18 @@ func (b *bench) phaseBuild() error {
 		"snap-b":  {env: map[string]string{"VARIANT": "snap-b", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true, snapshot: true},
 	}
 	for name, o := range cfgs {
+		if o.ingress && b.noIngress {
+			continue
+		}
 		if _, _, err := b.build(name, b.writeConfig(name, o)); err != nil {
 			return err
 		}
 	}
 	if _, _, err := b.build("probe", b.writeProbeConfig()); err != nil {
 		return err
+	}
+	if b.noIngress {
+		return nil
 	}
 	if _, _, err := b.build("probe-ing", b.writeProbeConfigFor("probe-ing", ingressPort)); err != nil {
 		return err
@@ -694,12 +729,14 @@ func parseCPUTime(s string) float64 {
 // ---- phase 2: warm ----
 
 type warmOut struct {
-	Total     int     `json:"total"`
-	Uploaded  int     `json:"uploaded"`
-	Bytes     int64   `json:"bytes"`
-	Files     int64   `json:"files"`
-	Duration  float64 `json:"duration"`
-	GuestTime float64 `json:"guestTime"`
+	Total      int     `json:"total"`
+	Uploaded   int     `json:"uploaded"`
+	Bytes      int64   `json:"bytes"`
+	Files      int64   `json:"files"`
+	Duration   float64 `json:"duration"`
+	GuestTime  float64 `json:"guestTime"`
+	Status     float64 `json:"status"`
+	Precompose float64 `json:"precompose"`
 }
 
 func (b *bench) phaseWarm() error {
@@ -716,9 +753,13 @@ func (b *bench) phaseWarm() error {
 	var wb warmOut
 	wall, err = b.oarJSON(&wb, "--bundle", b.digests["b"], "warm")
 	if err == nil {
-		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB", wb.Uploaded, float64(wb.Bytes)/(1<<20))
+		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms，CLI 总计 %.1f ms",
+			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.Duration/1e6)
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
+		if b.digests[name] == "" {
+			continue // not built (-no-ingress)
+		}
 		if _, err := b.oarJSON(nil, "--bundle", b.digests[name], "warm"); err != nil {
 			return err
 		}
@@ -743,7 +784,7 @@ type runOut struct {
 		Container proto.Container `json:"container"`
 		Cached    bool            `json:"cached"`
 		Timings   struct {
-			Compose, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Snapshot, Restore, Total float64
+			Compose, StoreView, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Snapshot, Restore, Total float64
 		} `json:"timings"`
 		Replaced      string `json:"replaced"`
 		Restored      bool   `json:"restored"`
@@ -773,18 +814,51 @@ func (b *bench) rm(name string) {
 	}
 }
 
+// joinMs formats samples as "a / b / c".
+func joinMs(v []float64) string {
+	var parts []string
+	for _, x := range v {
+		parts = append(parts, fmt.Sprintf("%.1f", x))
+	}
+	return strings.Join(parts, " / ")
+}
+
 func (b *bench) phaseStart() error {
 	const g = "4-start"
-	if st, err := b.stats(); err == nil {
-		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(st.Dirty)/(1<<20))
+	pre, err := b.stats()
+	if err == nil {
+		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(pre.Dirty+pre.Writeback)/(1<<20))
 	}
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
 		return err
 	}
 	t := first.Result.Timings
-	b.add(g, "first.total", "首次启动该组合（端到端，CLI）", "ms", true, ms(wall)).Note =
-		fmt.Sprintf("compose %.1f ms（cached=%v），create %.0f ms", t.Compose/1e6, first.Result.Cached, t.Create/1e6)
+	b.add(g, "first.total", "首次启动该组合（端到端，CLI，紧接预热之后）", "ms", true, ms(wall)).Note =
+		fmt.Sprintf("compose %.1f ms（其中挂载 store 视图 %.1f ms，cached=%v），create %.0f ms；启动前 guest 脏页 %.0f MiB、写回中 %.0f MiB，挂载 %d 个，视图 %d 个",
+			t.Compose/1e6, t.StoreView/1e6, first.Result.Cached, t.Create/1e6,
+			float64(pre.Dirty)/(1<<20), float64(pre.Writeback)/(1<<20), pre.Mounts, pre.StoreViews)
+	// the same for combos that were warmed but never started, after the
+	// guest wrote its dirty pages back: separates first-start cost from
+	// the write-back of the preceding warm
+	var settled, sCompose, sView, sCreate []float64
+	for _, name := range []string{"nogit", "hello", "b-plain"} {
+		if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+			return err
+		}
+		r, wall, err := b.run("f-"+name, b.digests[name])
+		if err != nil {
+			return err
+		}
+		t := r.Result.Timings
+		settled = append(settled, ms(wall))
+		sCompose = append(sCompose, t.Compose/1e6)
+		sView = append(sView, t.StoreView/1e6)
+		sCreate = append(sCreate, t.Create/1e6)
+		b.rm("f-" + name)
+	}
+	b.add(g, "first.settled", "首次启动该组合（脏页已写回，3 个组合）", "ms", true, settled...).Note =
+		fmt.Sprintf("compose %s ms（其中挂载 store 视图 %s ms），create %s ms", joinMs(sCompose), joinMs(sView), joinMs(sCreate))
 	mounts, _ := b.exec("s0", "sh", "-c", "wc -l < /proc/self/mountinfo")
 	if n, err := strconv.Atoi(strings.TrimSpace(mounts)); err == nil {
 		b.add(g, "mounts", "容器内挂载点数量", "个", true, float64(n))
@@ -912,7 +986,7 @@ func (b *bench) phaseRuntime() error {
 	const g = "6-runtime"
 	// pending writeback competes with the workload on slow disks
 	if st, err := b.stats(); err == nil {
-		b.add(g, "dirty", "开始时待写回的数据（Dirty + Writeback）", "MiB", true, float64(st.Dirty)/(1<<20))
+		b.add(g, "dirty", "开始时待写回的数据（Dirty + Writeback）", "MiB", true, float64(st.Dirty+st.Writeback)/(1<<20))
 	}
 	if _, _, err := b.run("work", b.digests["idle"]); err != nil {
 		return err
@@ -1029,14 +1103,14 @@ func (b *bench) phaseDensity() error {
 	// concurrent starts
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var conc []float64
+	var conc, cCompose, cInst, cCreate, cStart, cGuest []float64
 	var errs []string
 	t := time.Now()
 	for i := 0; i < k; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, d, err := b.run(fmt.Sprintf("c%d", i), b.digests["idle"])
+			r, d, err := b.run(fmt.Sprintf("c%d", i), b.digests["idle"])
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -1044,13 +1118,21 @@ func (b *bench) phaseDensity() error {
 				return
 			}
 			conc = append(conc, ms(d))
+			t := r.Result.Timings
+			cCompose = append(cCompose, t.Compose/1e6)
+			cInst = append(cInst, t.Instantiate/1e6)
+			cCreate = append(cCreate, t.Create/1e6)
+			cStart = append(cStart, t.Start/1e6)
+			cGuest = append(cGuest, t.Total/1e6)
 		}(i)
 	}
 	wg.Wait()
 	allWall := time.Since(t)
 	if len(conc) > 0 {
 		b.add(g, "concurrent", fmt.Sprintf("同时启动 %d 个容器：单个延迟", k), "ms", true, conc...).Note =
-			fmt.Sprintf("全部完成 %.0f ms，吞吐 %.1f 个/s，失败 %d", ms(allWall), float64(len(conc))/allWall.Seconds(), len(errs))
+			fmt.Sprintf("全部完成 %.0f ms，吞吐 %.1f 个/s，失败 %d；guest 内中位数：总计 %.0f ms = compose %.1f + 实例化 %.1f + runc create %.0f + runc start %.0f ms",
+				ms(allWall), float64(len(conc))/allWall.Seconds(), len(errs),
+				median(cGuest), median(cCompose), median(cInst), median(cCreate), median(cStart))
 	}
 	for i := 0; i < k; i++ {
 		b.rm(fmt.Sprintf("c%d", i))
@@ -1180,8 +1262,10 @@ func (b *bench) phaseSwitch() error {
 		b.add(g, sc.key+".gap", sc.label+"：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
 	}
 
-	if err := b.ingressScenarios(n); err != nil {
-		return err
+	if !b.noIngress {
+		if err := b.ingressScenarios(n); err != nil {
+			return err
+		}
 	}
 
 	// rollback
