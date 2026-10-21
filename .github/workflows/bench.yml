@@ -212,6 +212,13 @@ jobs:
           sudo defaults write $plist Shared_Net_Address -string ${{ github.event.inputs.vmnet_subnet }}
           sudo defaults write $plist Shared_Net_Mask -string 255.255.255.0
           sudo defaults read $plist
+          # VZ's NAT ignored the file alone: restart whatever caches it
+          # (best effort, each may not exist)
+          sudo launchctl kickstart -k system/com.apple.NetworkSharing || true
+          sudo launchctl kickstart -k system/com.apple.vmnetd || true
+          sudo pkill -x InternetSharing || true
+          sudo pkill -x bootpd || true
+          launchctl print system | grep -i -E 'vmnet|sharing|bootp' || true
       - if: steps.sel.outputs.run == 'true'
         name: benchmark (interleaved)
         working-directory: head
