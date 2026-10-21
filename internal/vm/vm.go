@@ -326,7 +326,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 			if err != nil {
 				return
 			}
-			go proxy(ctx, c, pool)
+			go proxy(ctx, c, pool, log)
 		}
 	}()
 
@@ -355,10 +355,25 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	return nil
 }
 
-func proxy(ctx context.Context, c net.Conn, pool *connPool) {
+func proxy(ctx context.Context, c net.Conn, pool *connPool, log io.Writer) {
 	defer c.Close()
-	g, err := pool.get(ctx)
+	// a failed connect used to close the client's connection silently (it
+	// saw "read response: EOF"); transient failures, as VZ produces right
+	// after boot, are retried and lasting ones logged
+	var g net.Conn
+	var err error
+	for attempt, delay := 0, 20*time.Millisecond; attempt < 6; attempt, delay = attempt+1, delay*2 {
+		if g, err = pool.get(ctx); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
 	if err != nil {
+		fmt.Fprintf(log, "connect to the guest agent: %v\n", err)
 		return
 	}
 	defer g.Close()
