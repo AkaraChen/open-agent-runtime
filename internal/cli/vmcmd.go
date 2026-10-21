@@ -25,6 +25,7 @@ type vmStartOpts struct {
 	memory     int
 	disk       int
 	guestDir   string
+	cmdline    string
 	root       string
 	foreground bool
 }
@@ -140,6 +141,8 @@ func addStartFlags(c *cobra.Command, o *vmStartOpts) {
 	c.Flags().IntVar(&o.memory, "memory", 2048, "guest memory (MiB)")
 	c.Flags().IntVar(&o.disk, "disk", 20, "guest data disk size (GiB, sparse)")
 	c.Flags().StringVar(&o.guestDir, "guest-dir", "", "directory containing kernel and initramfs.cpio.lz4")
+	c.Flags().StringVar(&o.cmdline, "guest-cmdline", "", "extra guest kernel parameters (debugging)")
+	c.Flags().MarkHidden("guest-cmdline")
 	c.Flags().StringVar(&o.root, "root", "", "cache directory for the native backend (default /var/lib/oar)")
 }
 
@@ -173,7 +176,7 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 	}
 	cfg := vm.MachineConfig{
 		Name: g.vmName, Dir: dir, Arch: o.arch, CPUs: o.cpus, MemoryMiB: o.memory, DiskGiB: o.disk,
-		Root: o.root, ConsoleLog: filepath.Join(dir, "console.log"), StoreView: os.Getenv("OAR_STORE_VIEW"),
+		Root: o.root, ConsoleLog: filepath.Join(dir, "console.log"), GuestCmdline: o.cmdline,
 	}
 	if b.NeedsGuestImage() {
 		cfg.Kernel, cfg.Initrd, err = vm.GuestImage(home, o.arch, o.guestDir)

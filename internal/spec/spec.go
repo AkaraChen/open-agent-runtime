@@ -42,6 +42,12 @@ type Runtime struct {
 	Platforms []string `yaml:"platforms"`
 	Nixpkgs   string   `yaml:"nixpkgs"`
 	Hostname  string   `yaml:"hostname"`
+	// Where Nix inputs are downloaded from, for networks that cannot reach
+	// the defaults. They do not change what is built: every store path is
+	// checked against its NarHash and the signatures of TrustedKeys.
+	NixpkgsMirror string   `yaml:"nixpkgs_mirror"`
+	Substituters  []string `yaml:"substituters"`
+	TrustedKeys   []string `yaml:"trusted_keys"`
 }
 
 // Source defines where a non-nix component comes from.

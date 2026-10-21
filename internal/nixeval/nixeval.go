@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -45,6 +44,8 @@ type Request struct {
 	Workers int
 	// CacheDir holds the embedded evaluator's compiled-file cache.
 	CacheDir string
+	// Mirror serves nixpkgs archives (default DefaultNixpkgsMirror).
+	Mirror string
 }
 
 // Result is what the builder needs of one attribute.
@@ -128,15 +129,9 @@ func Available(name string) (bool, string) {
 	return false, fmt.Sprintf("unknown backend %q (want %s)", name, strings.Join(Backends(), ", "))
 }
 
-// Default is the backend an empty --backend means: $OAR_NIX, else the first
-// available one in Backends order.
+// Default is the backend an empty --backend means: the first available one
+// in Backends order.
 func Default() (string, error) {
-	if v := os.Getenv("OAR_NIX"); v != "" {
-		if ok, why := Available(v); !ok {
-			return "", fmt.Errorf("OAR_NIX=%s: %s", v, why)
-		}
-		return v, nil
-	}
 	var reasons []string
 	for _, b := range Backends() {
 		ok, why := Available(b)

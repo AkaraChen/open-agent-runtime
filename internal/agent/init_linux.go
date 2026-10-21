@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,12 +36,12 @@ func RunInit() {
 		unix.Dup2(int(console.Fd()), 2)
 	}
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-	if os.Getenv("OAR_SWITCHED_ROOT") != "1" {
+	if !switchedRoot() {
 		logInit("init started") // timestamped by the host (boot phases)
 	}
 	// leave the initramfs so that pivot_root works (runc, CRIU restore)
 	switchRoot()
-	pivot := os.Getenv("OAR_SWITCHED_ROOT") == "1"
+	pivot := switchedRoot()
 	logInit("booting guest (agent %s)", Version)
 	mounts := []struct {
 		src, dst, typ string
@@ -66,11 +65,9 @@ func RunInit() {
 	}
 	enableControllers()
 	kernel := uptime()
-	if t, err := strconv.ParseFloat(os.Getenv("OAR_BOOT_KERNEL"), 64); err == nil {
-		kernel = t
-		if t, err := strconv.ParseFloat(os.Getenv("OAR_BOOT_SWITCHED"), 64); err == nil {
-			markBootAt("switchRoot", t)
-		}
+	if k, sw, ok := switchTimes(); ok {
+		kernel = k
+		markBootAt("switchRoot", sw)
 	}
 	markBootAt("kernel", kernel)
 	markBoot("mounts")

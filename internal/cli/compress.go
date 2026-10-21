@@ -10,23 +10,40 @@ import (
 	"github.com/AkaraChen/open-agent-runtime/internal/vm"
 )
 
-// warmCompression reports whether warm uploads are zstd-compressed:
-// OAR_WARM_COMPRESS=1 or 0 forces it; by default only a QEMU port forward
-// uses it. Same-runner A/B, both orders: QEMU warms 14-34% faster with it;
-// VZ about 25% slower (its guest decompresses slower than the channel
-// transfers, on the CI hosts measured), so VZ does not compress.
-func warmCompression(g *globalOpts) bool {
-	switch os.Getenv("OAR_WARM_COMPRESS") {
-	case "1":
-		return true
-	case "0":
-		return false
+// warmTuning is how a warm is done for a control channel. Every choice
+// was decided by same-runner A/B benchmarks (docs/benchmarks/12-warm):
+//
+//   - Flush: VM guests write the cache back before the warm returns; with
+//     hundreds of MB pending, the guest's first runc create waited ~400 ms
+//     for ext4's journal commit. The native backend skips it (its first
+//     start was unaffected and the host-wide flush made warms 4x slower).
+//   - Writeback: QEMU guests sync in the background while uploading, so
+//     the final flush is only the tail (kvm 3.8 -> 2.7 s, macOS QEMU
+//     49 -> 36 s); it made VZ and native slower.
+//   - Compress: zstd over a QEMU port forward (14-34% faster); VZ's guest
+//     decompresses slower than its channel transfers (~25% slower).
+type warmTuning struct{ Flush, Writeback, Compress bool }
+
+func tuningFor(transport string) warmTuning {
+	switch transport {
+	case "inprocess": // native
+		return warmTuning{}
+	case "vsock": // QEMU/KVM
+		return warmTuning{Flush: true, Writeback: true}
+	case "tcp": // QEMU through a port forward (macOS)
+		return warmTuning{Flush: true, Writeback: true, Compress: true}
+	default: // VZ, and anything unknown: the safe choice for a guest disk
+		return warmTuning{Flush: true}
 	}
+}
+
+// warmTuningFor reads the running VM's control channel.
+func warmTuningFor(g *globalOpts) warmTuning {
 	st, err := vm.ReadState(vmDir(g))
 	if err != nil {
-		return false
+		return tuningFor("")
 	}
-	return st.Transport == "tcp"
+	return tuningFor(st.Transport)
 }
 
 // zstdArtifact returns the zstd-compressed copy of the artifact at p,
@@ -70,45 +87,4 @@ func zstdArtifact(p string) (string, error) {
 		return "", err
 	}
 	return z, os.Rename(tmp.Name(), z)
-}
-
-// warmFlush reports whether a warm ends by writing the guest cache back:
-// OAR_WARM_FLUSH=1 or 0 forces it. VM guests flush: with hundreds of MB
-// still to write back, the guest's first runc create waited 377-409 ms
-// for ext4's journal commit and the next view build slowed 2-3x (kvm,
-// same-runner A/B; 43 ms after the flush). The native backend does not:
-// there the first start was unaffected while the flush of the host
-// filesystem made warms 4x slower.
-func warmFlush(g *globalOpts) bool {
-	switch os.Getenv("OAR_WARM_FLUSH") {
-	case "1":
-		return true
-	case "0":
-		return false
-	}
-	st, err := vm.ReadState(vmDir(g))
-	if err != nil {
-		return true
-	}
-	return st.Transport != "inprocess"
-}
-
-// warmWriteback reports whether the agent syncs the guest cache in the
-// background while a warm uploads, so the final flush has only the tail
-// left: OAR_WARM_WRITEBACK=1 or 0 forces it. Same-runner A/B: kvm cold warm
-// 3.8 -> 2.7 s and QEMU 49 -> 36 s (the final flush 1.45 s -> 21 ms and
-// 2.1 s -> 0.14 s), but VZ 37 -> 43 s and native (which does not flush)
-// 1.6 -> 2.3 s, so only QEMU-based guests use it.
-func warmWriteback(g *globalOpts) bool {
-	switch os.Getenv("OAR_WARM_WRITEBACK") {
-	case "1":
-		return true
-	case "0":
-		return false
-	}
-	st, err := vm.ReadState(vmDir(g))
-	if err != nil {
-		return false
-	}
-	return st.Transport == "vsock" || st.Transport == "tcp"
 }

@@ -6,15 +6,6 @@ on:
       profile:
         description: quick or full
         default: quick
-      ab_store_view:
-        description: also run the benchmark on the same runner with OAR_STORE_VIEW set to this (A/B)
-        default: ""
-      ab_env:
-        description: also run the benchmark on the same runner with these environment settings, e.g. OAR_QEMU_MACHINE=q35 (A/B)
-        default: ""
-      a_env:
-        description: environment settings for the first (A) run; with ab_env, swapping the two between runs cancels the order effect
-        default: ""
       base:
         description: >-
           A/B mode: also benchmark this commit (full sha, tag or branch) on
@@ -133,23 +124,9 @@ jobs:
       - run: hack/build.sh
       - name: benchmark
         run: |
-          env ${{ github.event.inputs.a_env }} go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
-            -profile ${{ github.event.inputs.profile || 'quick' }} \
-            -out results-${{ matrix.label }}.json -- --cpus 2 --memory 4096
-      - name: "benchmark (B, OAR_STORE_VIEW=${{ github.event.inputs.ab_store_view }})"
-        if: github.event.inputs.ab_store_view != ''
-        env:
-          OAR_STORE_VIEW: ${{ github.event.inputs.ab_store_view }}
-        run: |
           go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
             -profile ${{ github.event.inputs.profile || 'quick' }} \
-            -out results-${{ matrix.label }}-${{ github.event.inputs.ab_store_view }}.json -- --cpus 2 --memory 4096
-      - name: "benchmark (B, ${{ github.event.inputs.ab_env }})"
-        if: github.event.inputs.ab_env != ''
-        run: |
-          env ${{ github.event.inputs.ab_env }} go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
-            -profile ${{ github.event.inputs.profile || 'quick' }} \
-            -out results-${{ matrix.label }}-b.json -- --cpus 2 --memory 4096
+            -out results-${{ matrix.label }}.json -- --cpus 2 --memory 4096
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -230,7 +207,7 @@ jobs:
             [ $((i % 2)) = 0 ] && order="head base"
             for side in $order; do
               echo "::group::round $i: $side"
-              OAR_GUEST_DIR=$GITHUB_WORKSPACE/$side/guest/out go run ./hack/bench run \
+              go run ./hack/bench run -guest-dir $GITHUB_WORKSPACE/$side/guest/out \
                 -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
                 -profile ${{ github.event.inputs.profile || 'quick' }} -no-ingress \
                 -oar $GITHUB_WORKSPACE/$side/bin/oar \

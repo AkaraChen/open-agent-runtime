@@ -120,10 +120,10 @@ func TestSourceDownloadsOnce(t *testing.T) {
 		w.Write(data)
 	}))
 	defer srv.Close()
-	t.Setenv("OAR_NIXPKGS_MIRROR", srv.URL)
-	t.Setenv("OAR_CACHE_DIR", t.TempDir())
+	cacheRoot = t.TempDir()
+	t.Cleanup(func() { cacheRoot = "" })
 	var log bytes.Buffer
-	dir, err := Source(context.Background(), rev, &log)
+	dir, err := Source(context.Background(), rev, srv.URL, &log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,18 +143,18 @@ func TestSourceDownloadsOnce(t *testing.T) {
 	if !strings.Contains(log.String(), "downloading nixpkgs@") {
 		t.Fatalf("log: %q", log.String())
 	}
-	if _, err := Source(context.Background(), rev, nil); err != nil {
+	if _, err := Source(context.Background(), rev, srv.URL, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := hits.Load(); n != 1 {
 		t.Fatalf("downloaded %d times", n)
 	}
 	// a local checkout is used as it is
-	local, err := Source(context.Background(), dir, nil)
+	local, err := Source(context.Background(), dir, "", nil)
 	if err != nil || local != dir {
 		t.Fatalf("local checkout: %s %v", local, err)
 	}
-	if _, err := Source(context.Background(), t.TempDir(), nil); err == nil {
+	if _, err := Source(context.Background(), t.TempDir(), "", nil); err == nil {
 		t.Fatal("a directory without default.nix was accepted")
 	}
 }
@@ -167,10 +167,10 @@ func TestSourceRefusesEscape(t *testing.T) {
 	}, map[string]string{top + "/default.nix": "{}", top + "/../evil": "x"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(data) }))
 	defer srv.Close()
-	t.Setenv("OAR_NIXPKGS_MIRROR", srv.URL)
 	cache := t.TempDir()
-	t.Setenv("OAR_CACHE_DIR", cache)
-	if _, err := Source(context.Background(), rev, nil); err == nil || !strings.Contains(err.Error(), "escapes") {
+	cacheRoot = cache
+	t.Cleanup(func() { cacheRoot = "" })
+	if _, err := Source(context.Background(), rev, srv.URL, nil); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("escape not refused: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cache, "nixpkgs", "evil")); err == nil {
@@ -226,12 +226,12 @@ func TestChildEvalError(t *testing.T) {
 
 func TestChildCrash(t *testing.T) {
 	exe := fakeOar(t, `echo "thread 'iets-eval' panicked at src/eval/mod.rs" >&2; kill -ABRT $$`)
-	c := Child{Executable: exe}
+	c := Child{Executable: exe, Backend: Embedded} // no fallback
 	_, err := c.Eval(context.Background(), Request{Nixpkgs: rev, System: "x86_64-linux", Attrs: []string{"hello"}})
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"crashed", "panicked", "OAR_NIX=local"} {
+	for _, want := range []string{"crashed", "panicked"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}

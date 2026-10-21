@@ -5,6 +5,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -19,7 +20,7 @@ const ramfsMagic = 0x858458f6
 // bind mount has a parent mount, which is all pivot_root needs, so nothing
 // is copied. It returns only if no switch is needed or it failed.
 func switchRoot() {
-	if os.Getenv("OAR_SWITCHED_ROOT") == "1" {
+	if switchedRoot() {
 		return
 	}
 	start := uptime()
@@ -46,8 +47,27 @@ func switchRoot() {
 		return
 	}
 	os.Chdir("/")
-	env := append(os.Environ(), "OAR_SWITCHED_ROOT=1",
-		fmt.Sprintf("OAR_BOOT_KERNEL=%f", start), fmt.Sprintf("OAR_BOOT_SWITCHED=%f", uptime()))
-	err := syscall.Exec("/init", []string{"/init"}, env)
+	// the re-executed init learns through its arguments that it runs on the
+	// switched root, and when the kernel handed over and the switch ended
+	args := []string{"/init", switchedMark, fmt.Sprintf("%f", start), fmt.Sprintf("%f", uptime())}
+	err := syscall.Exec("/init", args, os.Environ())
 	logInit("switch_root: exec: %v", err)
+}
+
+// switchedMark is the first argument of an init re-executed by switchRoot
+// (the kernel passes unknown command-line words to init as arguments, so
+// the mark must not look like one).
+const switchedMark = "oar-switched-root"
+
+func switchedRoot() bool { return len(os.Args) > 1 && os.Args[1] == switchedMark }
+
+// switchTimes returns the uptimes switchRoot passed on: kernel handover and
+// end of the switch.
+func switchTimes() (kernel, switched float64, ok bool) {
+	if !switchedRoot() || len(os.Args) < 4 {
+		return 0, 0, false
+	}
+	k, err1 := strconv.ParseFloat(os.Args[2], 64)
+	s, err2 := strconv.ParseFloat(os.Args[3], 64)
+	return k, s, err1 == nil && err2 == nil
 }

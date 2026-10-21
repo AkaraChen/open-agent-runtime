@@ -31,9 +31,6 @@ func (qemu) NeedsGuestImage() bool { return true }
 func (qemu) NeedsRoot() bool       { return false }
 
 func qemuBinary(arch string) string {
-	if b := os.Getenv("OAR_QEMU"); b != "" {
-		return b
-	}
 	if arch == "arm64" {
 		return "qemu-system-aarch64"
 	}
@@ -49,9 +46,6 @@ func (qemu) Available() error {
 
 // accelerator picks kvm/hvf/whpx when usable for arch, else tcg.
 func accelerator(arch string) string {
-	if a := os.Getenv("OAR_QEMU_ACCEL"); a != "" {
-		return a
-	}
 	if arch != runtime.GOARCH {
 		return "tcg"
 	}
@@ -81,22 +75,14 @@ type qemuMachine struct {
 }
 
 // HostForward makes QEMU listen on 127.0.0.1:port and forward to the same
-// guest port (user networking). OAR_QEMU_FORWARD=vmm|channel overrides the
-// default (vmm with the TCP transport, channel with vsock).
+// guest port (user networking). Only with the TCP transport: over vsock the
+// control channel is faster than user networking (slirp).
 func (m *qemuMachine) HostForward(port int) error {
 	if m.qmp == nil {
 		return fmt.Errorf("no QMP socket")
 	}
-	// over vsock the control channel is fast; user networking (slirp) is
-	// the better path only where the channel itself is a port forward
-	switch os.Getenv("OAR_QEMU_FORWARD") {
-	case "channel":
-		return fmt.Errorf("disabled by OAR_QEMU_FORWARD=channel")
-	case "vmm":
-	default:
-		if m.tcpAddr == "" {
-			return fmt.Errorf("vsock transport: the control channel is used")
-		}
+	if m.tcpAddr == "" {
+		return fmt.Errorf("vsock transport: the control channel is used")
 	}
 	return m.qmp.hmp(fmt.Sprintf("hostfwd_add net0 tcp:127.0.0.1:%d-:%d", port, port))
 }
@@ -139,18 +125,14 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		// q35, whose PCI and ACPI enumeration dominated the kernel's boot.
 		// It has no HPET or ACPI PM timer, so the kernel needs kvm-clock to
 		// learn the TSC frequency: without KVM, a loaded host can make PIT
-		// calibration fail and the boot hang. OAR_QEMU_MACHINE overrides.
+		// calibration fail and the boot hang.
 		machine, console = "q35,accel="+accel, "ttyS0"
-		want := os.Getenv("OAR_QEMU_MACHINE")
-		if want == "microvm" || want == "" && accel == "kvm" {
+		if accel == "kvm" {
 			// devices on microvm's PCIe host bridge (virtio-pci with MSI):
 			// guest connections take half as long as with virtio-mmio's
 			// legacy interrupts (0.10 vs 0.23 ms per connect) for 12 ms of
-			// kernel boot; OAR_QEMU_MICROVM_PCIE=0 selects virtio-mmio
+			// kernel boot
 			machine, bus = "microvm,accel="+accel+",pcie=on,rtc=on", "-pci"
-			if os.Getenv("OAR_QEMU_MICROVM_PCIE") == "0" {
-				machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
-			}
 		}
 	case "arm64":
 		machine, console = "virt,accel="+accel, "ttyAMA0"
@@ -163,11 +145,8 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	useVsock := vsockAvailable()
 	m := &qemuMachine{done: make(chan struct{})}
 	cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
-	if cfg.StoreView != "" {
-		cmdline += " oar.storeview=" + cfg.StoreView
-	}
-	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
-		cmdline += " " + extra
+	if cfg.GuestCmdline != "" {
+		cmdline += " " + cfg.GuestCmdline
 	}
 	// QEMU user networking always hands out the same addresses
 	cmdline += " oar.net=10.0.2.15/24,10.0.2.2,10.0.2.3"

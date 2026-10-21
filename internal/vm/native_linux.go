@@ -27,17 +27,12 @@ func (native) NeedsRoot() bool       { return true }
 
 func (native) Available() error {
 	if _, err := exec.LookPath(runcBinary()); err != nil {
-		return fmt.Errorf("runc not found in PATH (install runc or set OAR_RUNC)")
+		return fmt.Errorf("runc not found in PATH (install runc)")
 	}
 	return nil
 }
 
-func runcBinary() string {
-	if r := os.Getenv("OAR_RUNC"); r != "" {
-		return r
-	}
-	return "runc"
-}
+func runcBinary() string { return "runc" }
 
 type nativeMachine struct {
 	srv  *agent.Server
@@ -58,10 +53,9 @@ func (native) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		root = agent.GuestRoot
 	}
 	srv, err := agent.New(agent.Config{
-		Root:      root,
-		Mode:      "native",
-		StoreView: cfg.StoreView,
-		Runc:      agent.Runc{Binary: runcBinary(), Root: "/run/oar/runc"},
+		Root: root,
+		Mode: "native",
+		Runc: agent.Runc{Binary: runcBinary(), Root: "/run/oar/runc"},
 	})
 	if err != nil {
 		return nil, err

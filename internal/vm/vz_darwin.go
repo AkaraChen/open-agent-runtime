@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -47,11 +46,8 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	console := "hvc0"
 	cmdline := "console=" + console + " panic=-1 quiet loglevel=3"
-	if cfg.StoreView != "" {
-		cmdline += " oar.storeview=" + cfg.StoreView
-	}
-	if extra := os.Getenv("OAR_GUEST_CMDLINE"); extra != "" {
-		cmdline += " " + extra
+	if cfg.GuestCmdline != "" {
+		cmdline += " " + cfg.GuestCmdline
 	}
 	boot, err := vz.NewLinuxBootLoader(cfg.Kernel,
 		vz.WithCommandLine(cmdline),
@@ -79,15 +75,8 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	// The data disk is a rebuildable cache: guest flushes become fsync
 	// instead of F_FULLFSYNC (VZ's default "full" mode), which is an order of
-	// magnitude faster on macOS. OAR_VZ_DISK_SYNC=full|fsync|none overrides.
-	sync := vz.DiskImageSynchronizationModeFsync
-	switch os.Getenv("OAR_VZ_DISK_SYNC") {
-	case "full":
-		sync = vz.DiskImageSynchronizationModeFull
-	case "none":
-		sync = vz.DiskImageSynchronizationModeNone
-	}
-	diskAtt, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(disk, false, vz.DiskImageCachingModeCached, sync)
+	// magnitude faster on macOS.
+	diskAtt, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(disk, false, vz.DiskImageCachingModeCached, vz.DiskImageSynchronizationModeFsync)
 	if err != nil {
 		return nil, fmt.Errorf("disk: %w", err)
 	}
@@ -183,7 +172,7 @@ func (m *vzMachine) Transport() string { return "vz-vsock" }
 
 // GuestNetwork reports that the guest's NAT address is reachable from the
 // host, so ingress ports are proxied to it directly.
-func (m *vzMachine) GuestNetwork() bool { return os.Getenv("OAR_VZ_FORWARD") != "channel" }
+func (m *vzMachine) GuestNetwork() bool { return true }
 
 func (m *vzMachine) Kill() error {
 	if m.vm.CanStop() {

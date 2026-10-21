@@ -12,7 +12,7 @@
 | `android` | — | extension point (AVF / crosvm), planned |
 
 Defaults: `vz` on macOS (or `qemu` when the host has no hypervisor support), `native` on Linux, and
-`wsl2` on Windows. Override the default with `--backend` or `OAR_BACKEND`, and list what works on the
+`wsl2` on Windows. Override the default with `--backend`, and list what works on the
 current host with `oar vm backends`.
 
 ## Verified in CI
@@ -37,8 +37,9 @@ $ ls guest/out/amd64
 initramfs.cpio.lz4  kernel  kernel.config  rootfs.tar
 ```
 
-`oar vm start` looks for the image in `--guest-dir`, then `$OAR_GUEST_DIR`, then
-`~/.local/share/oar/guest/<arch>`, then next to the binary, and finally `guest/out/<arch>`.
+`oar vm start` looks for the image in `--guest-dir`, then `<state directory>/guest/<arch>`, then
+next to the binary (`../share/oar/guest/<arch>`, `guest/<arch>`, or `../guest/out/<arch>` of a
+checkout), and finally `guest/out/<arch>` of the current directory.
 
 ## macOS
 

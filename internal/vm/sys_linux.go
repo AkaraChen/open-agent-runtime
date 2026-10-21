@@ -13,10 +13,9 @@ import (
 	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
+// vsockAvailable reports whether QEMU can use vhost-vsock; otherwise the
+// control channel is a TCP port forward.
 func vsockAvailable() bool {
-	if os.Getenv("OAR_QEMU_TRANSPORT") == "tcp" {
-		return false
-	}
 	f, err := os.OpenFile("/dev/vhost-vsock", os.O_RDWR, 0)
 	if err != nil {
 		return false

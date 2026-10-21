@@ -90,7 +90,7 @@ func openBundle(ctx context.Context, g *globalOpts) (*session, error) {
 }
 
 func quietLog(g *globalOpts) io.Writer {
-	if g.jsonOut && os.Getenv("OAR_VERBOSE") == "" {
+	if g.jsonOut {
 		return io.Discard
 	}
 	return os.Stderr
@@ -171,10 +171,9 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	if verbose {
 		fmt.Fprintf(os.Stderr, "warming guest cache: %d of %d artifacts (%s)\n", len(st.Missing), len(items), human(total))
 	}
-	if precompose && os.Getenv("OAR_VIEW_PREPARE") != "0" {
+	if precompose {
 		// the agent links the store paths it already has into the view
-		// while the rest uploads (an older agent rejects the op: ignored;
-		// OAR_VIEW_PREPARE=0 skips it for comparisons)
+		// while the rest uploads (an older agent rejects the op: ignored)
 		var ok map[string]string
 		_ = s.client.Call(ctx, proto.OpViewPrepare, proto.ComposeArgs{Lock: s.lock}, &ok)
 	}
@@ -183,7 +182,8 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
-	compress, writeback := warmCompression(s.g), warmWriteback(s.g)
+	tuning := warmTuningFor(s.g)
+	compress, writeback := tuning.Compress, tuning.Writeback
 	var wire atomic.Int64
 	tUpload := time.Now()
 	eg, ectx := errgroup.WithContext(ctx)
@@ -281,7 +281,7 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 // ones.
 func (s *session) precompose(ctx context.Context, stats *warmStats) error {
 	var res proto.ComposeResult
-	flush := warmFlush(s.g)
+	flush := warmTuningFor(s.g).Flush
 	err := s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
 	stats.View, stats.Flush = res.View, res.Flush
 	return err

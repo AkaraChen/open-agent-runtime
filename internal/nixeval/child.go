@@ -14,7 +14,8 @@ import (
 // Child evaluates by running `oar nix-eval --json` as a child process, so
 // an evaluator that dies (an abort in the embedded library, an out-of-memory
 // exit) is an error here rather than the end of the caller. The child picks
-// the backend ($OAR_NIX or the first available one) unless Backend is set.
+// the backend (the first available one) unless Backend is set; if that
+// evaluator crashes, the next available one is used.
 type Child struct {
 	// Executable defaults to the running binary.
 	Executable string
@@ -60,6 +61,9 @@ func (c Child) Eval(ctx context.Context, req Request) ([]byte, error) {
 	if c.Backend != "" {
 		args = append(args, "--backend", c.Backend)
 	}
+	if req.Mirror != "" {
+		args = append(args, "--nixpkgs-mirror", req.Mirror)
+	}
 	if req.Workers > 0 {
 		args = append(args, "--workers", strconv.Itoa(req.Workers))
 	}
@@ -88,8 +92,22 @@ func (c Child) Eval(ctx context.Context, req Request) ([]byte, error) {
 	msg := strings.TrimSpace(tail.buf.String())
 	var exit *exec.ExitError
 	if ok := asExitError(err, &exit); ok && !exit.Exited() {
-		// a signal: the evaluator aborted or was killed
-		return nil, fmt.Errorf("nix evaluator crashed (%s)%s\n  set OAR_NIX=local to use nix-instantiate instead", exit.ProcessState, indent(msg))
+		// a signal: the evaluator aborted or was killed. With the default
+		// backend, the next available one evaluates instead.
+		crash := fmt.Errorf("nix evaluator crashed (%s)%s", exit.ProcessState, indent(msg))
+		if c.Backend == "" {
+			for _, b := range []string{Local, Docker} {
+				if ok, _ := Available(b); ok {
+					if c.Log != nil {
+						fmt.Fprintf(c.Log, "%v\n  evaluating with %s instead\n", crash, b)
+					}
+					next := c
+					next.Backend = b
+					return next.Eval(ctx, req)
+				}
+			}
+		}
+		return nil, crash
 	}
 	if msg == "" {
 		msg = err.Error()

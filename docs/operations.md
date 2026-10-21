@@ -105,9 +105,10 @@ $ oar nix-eval --backend local nodejs_22              # the same through nix-ins
 ```
 
 The nixpkgs tree of a revision is downloaded once into the user cache directory
-(`~/.cache/oar/nixpkgs/<rev>/` on Linux, `~/Library/Caches/oar/` on macOS; `OAR_CACHE_DIR`
-overrides it), next to the evaluator's compiled-file cache. `--backend` picks the embedded evaluator,
-`nix-instantiate` on `PATH` or the `nixos/nix` Docker image; `OAR_NIX` sets the default for builds.
+(`~/.cache/oar/nixpkgs/<rev>/` on Linux, `~/Library/Caches/oar/` on macOS), next to the evaluator's
+compiled-file cache. `--backend` picks the embedded evaluator, `nix-instantiate` on `PATH` or the
+`nixos/nix` Docker image; builds use the first available one and move on to the next if the
+embedded evaluator crashes.
 Comparing `--backend embedded` with `--backend local` is the quickest way to check the embedded
 evaluator against Nix when a package looks wrong.
 

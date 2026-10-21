@@ -37,13 +37,10 @@ var Version = "0.1.0"
 
 // Config configures an agent.
 type Config struct {
-	Root string // cache + state directory, e.g. /var/lib/oar
-	Runc Runc
-	Mode string // "vm" or "native"
-	// StoreView selects compose.Layout.StoreMode ("links" or "binds"); in
-	// vm mode it defaults to the oar.storeview kernel parameter.
-	StoreView string
-	Shutdown  func() // invoked by the shutdown op (vm mode)
+	Root     string // cache + state directory, e.g. /var/lib/oar
+	Runc     Runc
+	Mode     string // "vm" or "native"
+	Shutdown func() // invoked by the shutdown op (vm mode)
 }
 
 // Server implements the agent protocol.
@@ -79,17 +76,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Runc.Root == "" {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
-	mode := cfg.StoreView
-	if mode == "" && cfg.Mode == "vm" {
-		mode = cmdlineParam("oar.storeview")
-	}
-	if mode == "links" {
-		mode = ""
-	}
-	if mode != "" && mode != "binds" {
-		return nil, fmt.Errorf("unknown store view mode %q", mode)
-	}
-	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root, StoreMode: mode}, booted: time.Now()}
+	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
 	// a fresh version after a restart, so a waiting host never mistakes
 	// the new list for the one it already has
 	s.ing.ver = uint64(s.booted.UnixNano())
@@ -108,7 +95,7 @@ func New(cfg Config) (*Server, error) {
 		os.RemoveAll(filepath.Join(s.layout.Tmp(), e.Name()))
 	}
 	// and from view builds an agent restart interrupted
-	for _, dir := range []string{"views", "skeletons"} {
+	for _, dir := range []string{"views"} {
 		tmps, _ := filepath.Glob(filepath.Join(cfg.Root, dir, "store.tmp-*"))
 		for _, t := range tmps {
 			os.RemoveAll(t)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 )
 
@@ -42,14 +41,11 @@ type docker struct{}
 
 func (docker) Name() string { return Docker }
 
-// DockerImage is the image the docker backend runs; $OAR_NIX_IMAGE overrides it.
+// DockerImage is the image the docker backend runs.
 const DockerImage = "nixos/nix:latest"
 
 func (docker) Eval(ctx context.Context, req Request) ([]byte, error) {
-	img := os.Getenv("OAR_NIX_IMAGE")
-	if img == "" {
-		img = DockerImage
-	}
+	img := DockerImage
 	args := []string{"run", "--rm",
 		"-v", req.NixpkgsDir + ":/nixpkgs:ro",
 		"-v", "oar-nix-cache:/root/.cache",

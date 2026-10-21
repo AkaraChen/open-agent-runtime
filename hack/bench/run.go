@@ -43,6 +43,8 @@ type bench struct {
 	exDir    string
 	root     string // native backend cache dir
 	vmArgs   []string
+	data     string // XDG_DATA_HOME of the CLI runs
+	guest    string // guest image directory (-guest-dir)
 	quick    bool
 	res      *Result
 	digests  map[string]string
@@ -58,6 +60,7 @@ func runMain(args []string) error {
 	out := fs.String("out", "results.json", "output file")
 	profile := fs.String("profile", "quick", "quick or full")
 	oarBin := fs.String("oar", "bin/oar", "oar binary")
+	guestDir := fs.String("guest-dir", "", "guest image directory with <arch>/ subdirectories (default: guest/out of this repository)")
 	example := fs.String("example", "examples/agent-runtime", "example directory (config templates live here)")
 	arch := fs.String("arch", runtime.GOARCH, "guest architecture")
 	keep := fs.Bool("keep", false, "keep artifacts and configs (debugging)")
@@ -70,7 +73,7 @@ func runMain(args []string) error {
 	exAbs, _ := filepath.Abs(*example)
 	b := &bench{
 		oar: oarAbs, backend: *backend, arch: *arch, platform: "linux/" + *arch,
-		exDir: exAbs, vmArgs: fs.Args(), quick: *profile != "full",
+		exDir: exAbs, vmArgs: fs.Args(), quick: *profile != "full", guest: *guestDir,
 		digests: map[string]string{}, noIngress: *noIngress,
 		res: &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
 	}
@@ -79,9 +82,10 @@ func runMain(args []string) error {
 		b.res.Commit = strings.TrimSpace(string(out))
 	}
 	var err error
-	if b.home, err = os.MkdirTemp("", "oar-bench-home-"); err != nil {
+	if b.data, err = os.MkdirTemp("", "oar-bench-home-"); err != nil {
 		return err
 	}
+	b.home = filepath.Join(b.data, "oar") // $XDG_DATA_HOME/oar
 	// artifacts can be large; keep them next to the example (not in /tmp)
 	if b.art, err = os.MkdirTemp(b.exDir, ".bench-artifacts-"); err != nil {
 		return err
@@ -92,7 +96,7 @@ func runMain(args []string) error {
 	if !*keep {
 		defer b.cleanup()
 	} else {
-		defer logf("kept artifacts in %s, OAR_HOME %s", b.art, b.home)
+		defer logf("kept artifacts in %s, oar state in %s", b.art, b.home)
 	}
 
 	start := time.Now()
@@ -175,12 +179,16 @@ func boolVal(v bool) float64 {
 // ---- command helpers ----
 
 func (b *bench) env() []string {
-	env := append(os.Environ(), "OAR_HOME="+b.home)
-	if gd := os.Getenv("OAR_GUEST_DIR"); gd == "" {
-		repo := filepath.Dir(filepath.Dir(b.exDir))
-		env = append(env, "OAR_GUEST_DIR="+filepath.Join(repo, "guest", "out"))
+	// XDG_DATA_HOME for the CLI; OAR_HOME for older binaries in an A/B
+	return append(os.Environ(), "XDG_DATA_HOME="+b.data, "OAR_HOME="+b.home)
+}
+
+// guestDir is the guest image directory passed to vm start.
+func (b *bench) guestDir() string {
+	if b.guest != "" {
+		return b.guest
 	}
-	return env
+	return filepath.Join(filepath.Dir(filepath.Dir(b.exDir)), "guest", "out")
 }
 
 // oarCmd runs the CLI and returns stdout and the wall time.
@@ -410,7 +418,7 @@ func (b *bench) cleanup() {
 		os.Remove(c)
 	}
 	os.RemoveAll(b.art)
-	os.RemoveAll(b.home)
+	os.RemoveAll(b.data)
 	if b.root != "" {
 		exec.Command("sudo", "rm", "-rf", b.root).Run()
 	}
@@ -576,7 +584,7 @@ func (b *bench) phaseBuild() error {
 
 func (b *bench) phaseVM() error {
 	const g = "3-vm"
-	args := []string{"vm", "start", "--backend", b.backend, "--arch", b.arch}
+	args := []string{"vm", "start", "--backend", b.backend, "--arch", b.arch, "--guest-dir", filepath.Join(b.guestDir(), b.arch)}
 	if b.root != "" {
 		args = append(args, "--root", b.root)
 	}
@@ -1647,7 +1655,7 @@ func (b *bench) phaseVMRestart() error {
 			m.Status = "fail"
 		}
 	}
-	args := []string{"vm", "start", "--backend", b.backend, "--arch", b.arch}
+	args := []string{"vm", "start", "--backend", b.backend, "--arch", b.arch, "--guest-dir", filepath.Join(b.guestDir(), b.arch)}
 	if b.root != "" {
 		args = append(args, "--root", b.root)
 	}

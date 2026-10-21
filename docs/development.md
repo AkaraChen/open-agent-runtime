@@ -53,11 +53,12 @@ libraries for every platform (`.github/workflows/iets-lib.yml`).
 | `BACKEND=<native\|kvm\|qemu\|vz> hack/e2e.sh` | MVP acceptance: start, deterministic digest and environment across shuffled configs, warm compose < 1 s, reload/stop/delete, resident guest |
 | `BACKEND=<...> hack/switch-bench.sh [N]` | switching between compiled bundles under client load, readiness rollback |
 
-Without KVM, VM paths can still be exercised under emulation:
+Without KVM, VM paths can still be exercised under emulation (QEMU falls back to TCG, and to a TCP
+control channel when `/dev/vhost-vsock` is not usable):
 
 ```console
-$ OAR_QEMU_TRANSPORT=tcp BACKEND=qemu hack/e2e.sh
-$ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
+$ BACKEND=qemu hack/e2e.sh
+$ GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
 ```
 
 ## Continuous integration
@@ -71,28 +72,41 @@ $ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
   Silicon);
 - runs the switch benchmark on Linux native and KVM.
 
-## Environment variables
+## Configuration and tuning
 
-| Variable | Purpose |
-|---|---|
-| `OAR_HOME` | state directory (default `~/.local/share/oar`) |
-| `OAR_BACKEND` | default backend |
-| `OAR_GUEST_DIR` | guest image location |
-| `OAR_NIX` | Nix evaluation backend: `embedded` (default when linked in), `local` (nix-instantiate), `docker` |
-| `OAR_NIX_IMAGE` | image for the `docker` backend (default `nixos/nix:latest`) |
-| `OAR_NIXPKGS_MIRROR` | base URL serving `<rev>.tar.gz` nixpkgs archives (default GitHub) |
-| `OAR_CACHE_DIR` | nixpkgs checkouts and the evaluator cache (default: the user cache directory, `oar/`) |
-| `OAR_NIX_SUBSTITUTERS`, `OAR_NIX_TRUSTED_KEYS` | binary caches and their keys |
-| `OAR_NO_IETS` | `1`: `hack/build.sh` builds without the embedded evaluator |
-| `OAR_IETS_LIB_URL`, `OAR_IETS_TARGET` | where `hack/fetch-iets.sh` downloads from; the Rust target `hack/build-iets.sh` builds for |
-| `OAR_RUNC` | runc binary for the native backend |
-| `OAR_QEMU`, `OAR_QEMU_ACCEL`, `OAR_QEMU_TRANSPORT` | QEMU binary, accelerator, `tcp` transport |
-| `OAR_QEMU_FORWARD`, `OAR_VZ_FORWARD` | `channel`: tunnel ingress ports through the control channel instead of QEMU's own port forwarding / a direct connection to the VZ guest |
-| `OAR_QEMU_MACHINE` | `q35` or `microvm`: machine type for amd64 guests (default: `microvm` with KVM, `q35` otherwise) |
-| `OAR_WARM_COMPRESS` | `1` or `0`: compress warm uploads with zstd (default: only over a QEMU port forward, the macOS QEMU backend; the compressed copy is cached as `<artifact>.zst`) |
-| `OAR_WARM_WRITEBACK` | `1` or `0`: the agent syncs the cache in the background while a warm uploads (default: QEMU-based guests yes, VZ and native no) |
-| `OAR_VIEW_PREPARE` | `0`: build the store view only at the end of a warm (comparisons) |
-| `OAR_WARM_FLUSH` | `1` or `0`: write the cache back at the end of a warm (default: VM guests yes, so their first start does not wait for ext4's journal; native no) |
-| `OAR_QEMU_MICROVM_PCIE` | `0`: microvm devices use virtio-mmio instead of its PCIe bridge |
-| `OAR_GUEST_CMDLINE` | extra guest kernel parameters (QEMU and VZ backends; debugging) |
-| `OAR_STORE_VIEW` | `binds`: containers see their closure through one bind mount per store path instead of a hard-link tree (read at `vm start`; for comparisons) |
+oar needs no environment variables. Everything that affects performance is chosen from the backend
+in use, from decisions measured with same-runner A/B benchmarks (`docs/benchmarks/`):
+
+| Choice | native | kvm (QEMU + KVM) | vz | qemu (TCG, port forward) |
+|---|---|---|---|---|
+| QEMU machine | — | `microvm`, virtio-pci on its PCIe bridge | — | `q35` (microvm needs kvm-clock) |
+| Control channel | in-process | vhost-vsock | VZ vsock | TCP port forward (when vsock is not usable) |
+| Host access to ingress ports | direct listen | control channel | direct to the guest's NAT address | QEMU's own forward (`hostfwd_add`) |
+| Warm: flush at the end | no | yes | yes | yes |
+| Warm: background writeback during upload | no | yes | no | yes |
+| Warm: zstd-compressed upload | no | no | no | yes |
+| Warm: store view built during upload, fewer syscalls per file | yes | yes | yes | yes |
+
+The control channel is reported by the backend (`State.Transport` in the VM's `state.json`); the CLI
+reads it to pick the warm settings.
+
+What can be set, when the defaults do not fit:
+
+- the backend and VM resources: `oar vm start --backend --cpus --memory --disk --arch`;
+- the guest image: found next to the binary, in the state directory or in `guest/out/` of a
+  checkout; `oar vm start --guest-dir` points elsewhere;
+- networks that cannot reach GitHub or `cache.nixos.org`: `runtime.nixpkgs_mirror`,
+  `runtime.substituters` and `runtime.trusted_keys` in `oar.yaml`;
+- the state directory follows `$XDG_DATA_HOME` (default `~/.local/share/oar`), the evaluator cache
+  `$XDG_CACHE_HOME` on Linux;
+- debugging: `oar vm start --guest-cmdline '...'` appends guest kernel parameters (hidden flag; the
+  `boot-profile` workflow uses it for `initcall_debug`).
+
+The Nix evaluator is the first available of the embedded one, `nix-instantiate` and Docker; if the
+embedded evaluator crashes, the build continues with the next available one.
+
+Only the development build scripts read variables of their own: `OAR_NO_IETS=1 hack/build.sh` builds
+without the embedded evaluator, `OAR_IETS_LIB_URL` and `OAR_IETS_TARGET` select where
+`hack/fetch-iets.sh` downloads from and the Rust target `hack/build-iets.sh` builds for. Build
+commands of `binary:` sources receive `OAR_ARCH`, `OAR_OS` and `OAR_PLATFORM` (see
+`configuration.md`).

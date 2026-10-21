@@ -87,15 +87,6 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	if b.StoreMode == "binds" {
-		// a skeleton: runc binds each store path onto its directory
-		for _, layer := range b.StoreLayers {
-			if err := os.Mkdir(filepath.Join(tmp, filepath.Base(layer)), 0o555); err != nil {
-				return err
-			}
-		}
-		return s.publishView(tmp, view, done)
-	}
 	// store paths are linked in parallel: the cost is one syscall per file
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
@@ -378,9 +369,9 @@ type viewBuild struct {
 var viewLinkers = make(chan struct{}, runtime.NumCPU()*2)
 
 // prepareView starts building view for layers unless it exists or is
-// already being built (links-mode views only).
+// already being built.
 func (s *Server) prepareView(layers []string, view string) {
-	if len(layers) == 0 || s.layout.StoreMode != "" {
+	if len(layers) == 0 {
 		return
 	}
 	s.groups.mu.Lock()

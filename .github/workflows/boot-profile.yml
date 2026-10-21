@@ -40,19 +40,19 @@ jobs:
       - run: CGO_ENABLED=0 go build -o bin/oar ./cmd/oar
       - name: boot with initcall_debug
         env:
-          OAR_HOME: ${{ runner.temp }}/oar
-          OAR_GUEST_DIR: ${{ github.workspace }}/guest/out
+          XDG_DATA_HOME: ${{ runner.temp }}/xdg
         run: |
+          OAR_STATE=$XDG_DATA_HOME/oar
           for run in plain debug; do
             extra="${{ github.event.inputs.cmdline }}"
             [ $run = debug ] && extra="$extra initcall_debug loglevel=8 printk.time=1"
-            OAR_GUEST_CMDLINE="$extra" bin/oar vm start --backend kvm --cpus 2 --memory 4096
-            cp "$OAR_HOME/vms/default/console.log" "console-$run.log"
+            bin/oar vm start --backend kvm --cpus 2 --memory 4096 --guest-cmdline "$extra"
+            cp "$OAR_STATE/vms/default/console.log" "console-$run.log"
             echo "== $run: phases (ms since start)"
-            jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_HOME/vms/default/state.json"
+            jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_STATE/vms/default/state.json"
             bin/oar vm stats | sed -n '1,12p'
             bin/oar vm stop
-            rm -f "$OAR_HOME/vms/default/data.img"
+            rm -f "$OAR_STATE/vms/default/data.img"
           done
           echo "== slowest initcalls (usecs)"
           grep -oE "initcall [^ ]+ returned [-0-9]+ after [0-9]+ usecs" console-debug.log |
@@ -99,14 +99,14 @@ jobs:
       - run: CGO_ENABLED=0 go build -o bin/oar ./cmd/oar
       - name: qemu microvm (oar kvm backend)
         env:
-          OAR_HOME: ${{ runner.temp }}/oar
-          OAR_GUEST_DIR: ${{ github.workspace }}/guest/out
+          XDG_DATA_HOME: ${{ runner.temp }}/xdg
         run: |
+          OAR_STATE=$XDG_DATA_HOME/oar
           for i in 1 2 3; do
             for state in cold warm; do
-              [ $state = cold ] && rm -f "$OAR_HOME/vms/default/data.img"
+              [ $state = cold ] && rm -f "$OAR_STATE/vms/default/data.img"
               bin/oar vm start --backend kvm --cpus 2 --memory 4096 >/dev/null
-              p=$(jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_HOME/vms/default/state.json")
+              p=$(jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_STATE/vms/default/state.json")
               rss=$(ps -o rss= -C qemu-system-x86_64 | head -1)
               echo "qemu microvm $state: $p RSS $((rss/1024)) MiB"
               bin/oar vm stop >/dev/null

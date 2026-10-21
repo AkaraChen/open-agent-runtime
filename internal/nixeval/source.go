@@ -17,19 +17,22 @@ import (
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
 )
 
-// DefaultNixpkgsMirror serves `<mirror>/<rev>.tar.gz`; $OAR_NIXPKGS_MIRROR
-// overrides it.
+// DefaultNixpkgsMirror serves `<mirror>/<rev>.tar.gz`; runtime.nixpkgs_mirror
+// of the config overrides it.
 const DefaultNixpkgsMirror = "https://github.com/NixOS/nixpkgs/archive"
+
+// cacheRoot replaces CacheDir in tests.
+var cacheRoot string
 
 // CacheDir is where evaluation inputs live: nixpkgs checkouts and the
 // embedded evaluator's compiled-file cache. They are build inputs shared by
 // every project, not artifacts, so they stay out of the artifacts directory
 // (a nixpkgs tree holds Go files that would break `go test ./...` of a
-// module the artifacts sit in). $OAR_CACHE_DIR overrides the user cache
-// directory.
+// module the artifacts sit in). It is in the user cache directory
+// ($XDG_CACHE_HOME on Linux).
 func CacheDir() string {
-	if v := os.Getenv("OAR_CACHE_DIR"); v != "" {
-		return v
+	if cacheRoot != "" {
+		return cacheRoot
 	}
 	base, err := os.UserCacheDir()
 	if err != nil {
@@ -50,7 +53,7 @@ func IRCacheDir() string { return filepath.Join(CacheDir(), "iets") }
 // nixpkgs commit downloaded once into SourceDir. The download is extracted
 // next to its final place and renamed into it, so a directory that exists
 // is complete.
-func Source(ctx context.Context, ref string, log io.Writer) (string, error) {
+func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, error) {
 	if log == nil {
 		log = io.Discard
 	}
@@ -68,7 +71,6 @@ func Source(ctx context.Context, ref string, log io.Writer) (string, error) {
 	if _, err := os.Stat(filepath.Join(dir, "default.nix")); err == nil {
 		return dir, nil
 	}
-	mirror := os.Getenv("OAR_NIXPKGS_MIRROR")
 	if mirror == "" {
 		mirror = DefaultNixpkgsMirror
 	}

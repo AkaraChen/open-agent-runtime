@@ -50,6 +50,9 @@ process:
 | `platforms` | Additional platforms to build artifacts for. |
 | `nixpkgs` | nixpkgs commit used for `nix:` components. It must be a full 40-character hash: branch names and tags are rejected because they move. It defaults to a pinned nixos-26.05 commit. |
 | `hostname` | Container hostname (default `oar`). |
+| `nixpkgs_mirror` | Base URL serving `<commit>.tar.gz` nixpkgs archives, for networks that cannot reach GitHub (default `https://github.com/NixOS/nixpkgs/archive`). |
+| `substituters` | Binary caches store paths are fetched from (default `https://cache.nixos.org`). |
+| `trusted_keys` | Public keys the fetched store paths must be signed with (default the `cache.nixos.org` key). Every path is also checked against its NarHash. |
 
 ## `components`
 

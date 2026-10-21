@@ -36,9 +36,9 @@ type MachineConfig struct {
 	Root string `json:"root,omitempty"`
 	// ConsoleLog receives the guest serial console.
 	ConsoleLog string `json:"consoleLog"`
-	// StoreView is the agent's store view mode (OAR_STORE_VIEW; benchmark
-	// comparisons), passed to guests as the oar.storeview kernel parameter.
-	StoreView string `json:"storeView,omitempty"`
+	// GuestCmdline is appended to the guest kernel command line
+	// (oar vm start --guest-cmdline, for debugging).
+	GuestCmdline string `json:"guestCmdline,omitempty"`
 }
 
 // Machine is a running guest.
@@ -104,9 +104,6 @@ func namesLocked() []string {
 
 // DefaultBackend is the preferred backend for this host OS.
 func DefaultBackend() string {
-	if b := os.Getenv("OAR_BACKEND"); b != "" {
-		return b
-	}
 	switch runtime.GOOS {
 	case "darwin":
 		// prefer Virtualization.framework, fall back to QEMU (HVF or TCG)
@@ -123,10 +120,11 @@ func DefaultBackend() string {
 	return "native"
 }
 
-// Home is the oar state directory.
+// Home is the oar state directory: $XDG_DATA_HOME/oar, by default
+// ~/.local/share/oar (%LOCALAPPDATA%\oar on Windows).
 func Home() string {
-	if h := os.Getenv("OAR_HOME"); h != "" {
-		return h
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" && filepath.IsAbs(d) {
+		return filepath.Join(d, "oar")
 	}
 	if runtime.GOOS == "windows" {
 		if d := os.Getenv("LOCALAPPDATA"); d != "" {
@@ -394,13 +392,11 @@ func GuestImage(home, arch, override string) (kernel, initrd string, err error) 
 	if override != "" {
 		dirs = append(dirs, override)
 	}
-	if d := os.Getenv("OAR_GUEST_DIR"); d != "" {
-		dirs = append(dirs, filepath.Join(d, arch), d)
-	}
 	dirs = append(dirs, filepath.Join(home, "guest", arch))
 	if exe, err := os.Executable(); err == nil {
 		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "..", "share", "oar", "guest", arch),
-			filepath.Join(filepath.Dir(exe), "guest", arch))
+			filepath.Join(filepath.Dir(exe), "guest", arch),
+			filepath.Join(filepath.Dir(exe), "..", "guest", "out", arch)) // bin/oar of a checkout
 	}
 	dirs = append(dirs, filepath.Join("guest", "out", arch))
 	for _, d := range dirs {
@@ -416,7 +412,7 @@ func GuestImage(home, arch, override string) (kernel, initrd string, err error) 
 			}
 		}
 	}
-	return "", "", fmt.Errorf("guest image for %s not found (looked in %s); build it with guest/build.sh %s or set OAR_GUEST_DIR",
+	return "", "", fmt.Errorf("guest image for %s not found (looked in %s); build it with guest/build.sh %s or pass --guest-dir",
 		arch, strings.Join(dirs, ", "), arch)
 }
 

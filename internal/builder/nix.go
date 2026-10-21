@@ -68,7 +68,7 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
 	b.opts.Stats.EvaluatedAttr += len(missing)
 	child := nixeval.Child{Log: b.opts.Log}
-	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing})
+	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing, Mirror: b.cfg.Runtime.NixpkgsMirror})
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +107,8 @@ func (b *Builder) fetchClosure(roots []string) (map[string]*storeMeta, error) {
 	f := &fetcher{
 		b:       b,
 		client:  &http.Client{},
-		subs:    splitEnv("OAR_NIX_SUBSTITUTERS", DefaultSubstituter),
-		trusted: splitEnv("OAR_NIX_TRUSTED_KEYS", DefaultTrustedKey),
+		subs:    orDefault(b.cfg.Runtime.Substituters, DefaultSubstituter),
+		trusted: orDefault(b.cfg.Runtime.TrustedKeys, DefaultTrustedKey),
 		done:    map[string]*storeMeta{},
 	}
 	queue := map[string]bool{}
@@ -150,12 +150,12 @@ func (b *Builder) fetchClosure(roots []string) (map[string]*storeMeta, error) {
 	return f.done, nil
 }
 
-func splitEnv(key, def string) []string {
-	v := os.Getenv(key)
-	if v == "" {
-		v = def
+// orDefault is v, or def split on whitespace when v is empty.
+func orDefault(v []string, def string) []string {
+	if len(v) == 0 {
+		return strings.Fields(def)
 	}
-	return strings.Fields(v)
+	return v
 }
 
 func (f *fetcher) fetch(base string) (*storeMeta, error) {

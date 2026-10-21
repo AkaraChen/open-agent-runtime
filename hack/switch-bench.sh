@@ -18,7 +18,9 @@ EX=$ROOT/examples/agent-runtime
 BACKEND=${BACKEND:-native}
 N=${1:-6}
 shift || true
-export OAR_HOME=${OAR_HOME:-$(mktemp -d)}
+# a private state directory: $XDG_DATA_HOME/oar
+export XDG_DATA_HOME=$(mktemp -d) # never the user's own state
+OAR_STATE=$XDG_DATA_HOME/oar
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
 ARCH=${GUEST_ARCH:-$ARCH}
 PLATFORM=linux/$ARCH
@@ -28,7 +30,7 @@ GEN=()
 oar() { "$OAR" --artifacts "$EX/artifacts" "$@"; }
 cleanup() {
   status=$?
-  [ $status -ne 0 ] && for f in "$OAR_HOME"/vms/default/{supervisor.log,console.log}; do [ -f "$f" ] && tail -n 30 "$f"; done
+  [ $status -ne 0 ] && for f in "$OAR_STATE"/vms/default/{supervisor.log,console.log}; do [ -f "$f" ] && tail -n 30 "$f"; done
   "$OAR" vm stop >/dev/null 2>&1 || true
   rm -f "${GEN[@]}"
   exit $status

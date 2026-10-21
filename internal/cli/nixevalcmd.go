@@ -15,7 +15,7 @@ import (
 )
 
 func nixEvalCmd(g *globalOpts) *cobra.Command {
-	var system, nixpkgs, backend, expr string
+	var system, nixpkgs, mirror, backend, expr string
 	var workers int
 	c := &cobra.Command{
 		Use:   "nix-eval [flags] ATTR...",
@@ -55,7 +55,10 @@ Examples:
 				return err
 			}
 			ctx := cmd.Context()
-			dir, err := nixeval.Source(ctx, nixpkgs, os.Stderr)
+			if mirror == "" && cfg != nil {
+				mirror = cfg.Runtime.NixpkgsMirror
+			}
+			dir, err := nixeval.Source(ctx, nixpkgs, mirror, os.Stderr)
 			if err != nil {
 				return err
 			}
@@ -95,7 +98,8 @@ Examples:
 	}
 	c.Flags().StringVar(&system, "system", "", "nix system to evaluate for: x86_64-linux or aarch64-linux (default: host)")
 	c.Flags().StringVar(&nixpkgs, "nixpkgs", "", "nixpkgs commit hash, or a local checkout (default: runtime.nixpkgs of the config)")
-	c.Flags().StringVar(&backend, "backend", "", "embedded, local or docker (default: $OAR_NIX, else the first available)")
+	c.Flags().StringVar(&mirror, "nixpkgs-mirror", "", "base URL serving <rev>.tar.gz nixpkgs archives (default: runtime.nixpkgs_mirror of the config, else GitHub)")
+	c.Flags().StringVar(&backend, "backend", "", "embedded, local or docker (default: the first available)")
 	c.Flags().StringVarP(&expr, "expr", "E", "", "evaluate an expression with pkgs and lib in scope instead of attributes")
 	c.Flags().IntVar(&workers, "workers", 0, "evaluator threads for the embedded backend (default: iets's own)")
 	return c
