@@ -46,6 +46,9 @@ type bench struct {
 	res      *Result
 	digests  map[string]string
 	configs  []string
+	// noIngress skips what needs the ingress proxy (process.ports,
+	// prepare --start), so builds from before it can be compared (A/B)
+	noIngress bool
 }
 
 func runMain(args []string) error {
@@ -58,6 +61,7 @@ func runMain(args []string) error {
 	arch := fs.String("arch", runtime.GOARCH, "guest architecture")
 	keep := fs.Bool("keep", false, "keep artifacts and configs (debugging)")
 	only := fs.String("only", "", "comma separated phases to run (debugging)")
+	noIngress := fs.Bool("no-ingress", false, "skip scenarios that need the ingress proxy (to compare with older builds)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,8 +70,8 @@ func runMain(args []string) error {
 	b := &bench{
 		oar: oarAbs, backend: *backend, arch: *arch, platform: "linux/" + *arch,
 		exDir: exAbs, vmArgs: fs.Args(), quick: *profile != "full",
-		digests: map[string]string{},
-		res:     &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
+		digests: map[string]string{}, noIngress: *noIngress,
+		res: &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
 	}
 	b.res.Host = hostDesc()
 	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
@@ -520,12 +524,18 @@ func (b *bench) phaseBuild() error {
 		"slowi-b": {env: map[string]string{"VARIANT": "slowi-b", "MY_AGENT_INIT_DELAY": "3s"}, ingress: true},
 	}
 	for name, o := range cfgs {
+		if o.ingress && b.noIngress {
+			continue
+		}
 		if _, _, err := b.build(name, b.writeConfig(name, o)); err != nil {
 			return err
 		}
 	}
 	if _, _, err := b.build("probe", b.writeProbeConfig()); err != nil {
 		return err
+	}
+	if b.noIngress {
+		return nil
 	}
 	if _, _, err := b.build("probe-ing", b.writeProbeConfigFor("probe-ing", ingressPort)); err != nil {
 		return err
@@ -706,6 +716,9 @@ func (b *bench) phaseWarm() error {
 			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.Duration/1e6)
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing"} {
+		if b.digests[name] == "" {
+			continue // not built (-no-ingress)
+		}
 		if _, err := b.oarJSON(nil, "--bundle", b.digests[name], "warm"); err != nil {
 			return err
 		}
@@ -782,7 +795,7 @@ func (b *bench) phaseStart() error {
 	// guest wrote its dirty pages back: separates first-start cost from
 	// the write-back of the preceding warm
 	var settled, sCompose, sView, sCreate []float64
-	for _, name := range []string{"nogit", "hello", "ing-b"} {
+	for _, name := range []string{"nogit", "hello", "b-plain"} {
 		if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
 			return err
 		}
@@ -1193,8 +1206,10 @@ func (b *bench) phaseSwitch() error {
 		b.add(g, sc.key+".gap", sc.label+"：客户端两次成功响应最长间隔", "ms", true, sum["maxGapMs"])
 	}
 
-	if err := b.ingressScenarios(n); err != nil {
-		return err
+	if !b.noIngress {
+		if err := b.ingressScenarios(n); err != nil {
+			return err
+		}
 	}
 
 	// rollback
