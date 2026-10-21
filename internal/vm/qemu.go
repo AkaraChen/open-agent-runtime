@@ -144,6 +144,10 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		want := os.Getenv("OAR_QEMU_MACHINE")
 		if want == "microvm" || want == "" && accel == "kvm" {
 			machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
+			if os.Getenv("OAR_QEMU_MICROVM_PCIE") == "1" {
+				// virtio-pci (MSI) on microvm's PCIe host bridge (comparison)
+				machine, bus = "microvm,accel="+accel+",pcie=on,rtc=on", "-pci"
+			}
 		}
 	case "arm64":
 		machine, console = "virt,accel="+accel, "ttyAMA0"
