@@ -529,21 +529,6 @@ func (vb *viewBuild) link(layer string) { vb.linkAll([]string{layer}) }
 // the scheduler runs those goroutines, and a big store path could be left
 // for the end of the build.
 func (vb *viewBuild) linkAll(layers []string) {
-	jobs := vb.claim(layers)
-	if len(jobs) == 0 {
-		return
-	}
-	go func() {
-		for _, layer := range jobs {
-			viewLinkers <- struct{}{}
-			go vb.run(layer)
-		}
-	}()
-}
-
-// claim takes those of layers that are still pending and present off the
-// pending set and counts them as link jobs, which the caller runs.
-func (vb *viewBuild) claim(layers []string) []string {
 	var jobs []string
 	vb.mu.Lock()
 	for _, layer := range layers {
@@ -559,7 +544,15 @@ func (vb *viewBuild) claim(layers []string) []string {
 	vb.inflight += len(jobs)
 	linkJobs.Add(int32(len(jobs)))
 	vb.mu.Unlock()
-	return jobs
+	if len(jobs) == 0 {
+		return
+	}
+	go func() {
+		for _, layer := range jobs {
+			viewLinkers <- struct{}{}
+			go vb.run(layer)
+		}
+	}()
 }
 
 // run links layer into the view, in a slot of viewLinkers that it frees.
