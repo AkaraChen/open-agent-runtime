@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Runc wraps the runc command line.
@@ -206,9 +208,13 @@ func (r *Runc) Exec(ctx context.Context, id string, env, args []string) (int, st
 	return code, stdout.String(), stderr.String(), nil
 }
 
-// WaitStopped polls until the container is stopped or the timeout expires.
+// WaitStopped waits until the container is stopped or the timeout expires.
+// It blocks on the container init's exit through a pidfd (the agent is not
+// its parent, so wait4 is not an option) and then confirms with runc state;
+// without pidfd_open (kernels before 5.3) it polls runc state every 50 ms.
 func (r *Runc) WaitStopped(ctx context.Context, id string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	waited := false
 	for {
 		st, err := r.State(ctx, id)
 		if err == nil && (st.Status == "stopped" || st.Status == "deleted") {
@@ -217,7 +223,42 @@ func (r *Runc) WaitStopped(ctx context.Context, id string, timeout time.Duration
 		if time.Now().After(deadline) {
 			return false
 		}
+		if err == nil && !waited && st.Pid > 0 {
+			// only once: if the pid was reused or the wait gave up early,
+			// the polling below still bounds the wait
+			waited = true
+			if waitPidExit(st.Pid, time.Until(deadline)) {
+				continue
+			}
+		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitPidExit blocks until the process exits (a zombie counts as exited) or
+// the timeout expires. It returns false when pidfd is unavailable.
+func waitPidExit(pid int, timeout time.Duration) bool {
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		// ESRCH: already gone; ENOSYS/EPERM/EINVAL: no pidfd support
+		return err == unix.ESRCH
+	}
+	defer unix.Close(fd)
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	end := time.Now().Add(timeout)
+	for {
+		left := time.Until(end)
+		if left <= 0 {
+			return true
+		}
+		ms := int(left / time.Millisecond)
+		if ms < 1 {
+			ms = 1
+		}
+		if _, err := unix.Poll(fds, ms); err == unix.EINTR {
+			continue
+		}
+		return true
 	}
 }
 

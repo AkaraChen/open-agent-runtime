@@ -291,6 +291,16 @@ sequenceDiagram
 - **replace** keeps ports exclusive. The gap is the old process's exit time plus the new process's
   startup, typically tens of milliseconds.
 
+With overlap, ingress and standby the reload result is still returned only after the old instance
+has exited (`timings.stopOld`), so an application that needs seconds to shut down delays the reply
+even though traffic already moved. The wait blocks on a pidfd of the container init (falling back to
+polling `runc state` every 50 ms on kernels without `pidfd_open`), so it costs no polling latency.
+Returning as soon as the new instance serves and retiring the old one in the background would remove
+that time from the reload, but it is not done: a second reload could start while the old instance
+still holds memory, cgroup limits and (without `SO_REUSEPORT`) possibly ports, a failing shutdown
+would no longer be reported to the caller, and "reload returned" would stop meaning "only one
+instance exists".
+
 See [operations.md](operations.md) for measurements.
 
 ## Determinism

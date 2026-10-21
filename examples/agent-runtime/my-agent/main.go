@@ -113,6 +113,11 @@ func main() {
 		select {
 		case s := <-sig:
 			fmt.Printf("my-agent: received %v, exiting\n", s)
+			// MY_AGENT_SHUTDOWN_DELAY simulates an application that needs
+			// time to flush state and stop after SIGTERM.
+			if d, err := time.ParseDuration(os.Getenv("MY_AGENT_SHUTDOWN_DELAY")); err == nil && d > 0 {
+				time.Sleep(d)
+			}
 			if srv != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				srv.Shutdown(ctx) // finish in-flight requests
