@@ -59,7 +59,10 @@ type Server struct {
 	runcVerOnce sync.Once
 	runcVer     string
 	warmMu      sync.Map // per-key locks for warm.put
-	// privateBind is set when New bind-mounted Root onto itself
+	// private gives Root private propagation before the first mount
+	// below it (see makePrivate); privateBind is set when that
+	// bind-mounted Root onto itself
+	private     sync.Once
 	privateBind bool
 }
 
@@ -81,7 +84,6 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	s.privateBind = makePrivate(cfg.Root)
 	// leftovers from interrupted transfers
 	entries, _ := os.ReadDir(s.layout.Tmp())
 	for _, e := range entries {
@@ -827,6 +829,7 @@ func (s *Server) instantiate(name string, b *compose.Bundle, extraEnv []string, 
 	}
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
 		strings.Join(b.Layers, ":"), filepath.Join(in.dir, "upper"), filepath.Join(in.dir, "work"))
+	s.makeRootPrivate()
 	if err := unix.Mount("overlay", filepath.Join(in.dir, "rootfs"), "overlay", 0, opts); err != nil {
 		os.RemoveAll(in.dir)
 		return nil, fmt.Errorf("mount overlay: %w", err)
@@ -1029,6 +1032,7 @@ func (s *Server) StopAll(ctx context.Context) {
 	}
 	s.cleanups.Wait()
 	s.unmountAllStoreViews()
+	s.makeRootPrivate() // no later call binds it again
 	if s.privateBind {
 		unix.Unmount(s.cfg.Root, unix.MNT_DETACH)
 	}

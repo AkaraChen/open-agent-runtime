@@ -49,6 +49,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		v.used = time.Now()
 		return nil
 	}
+	s.makeRootPrivate()
 	// a view left mounted by a previous agent (possibly half built) is
 	// rebuilt; running containers keep their own copy of the mounts
 	if isMountRoot(b.StoreView) {
@@ -128,6 +129,12 @@ func (s *Server) pruneStoreViewsLocked() {
 		unix.Unmount(c.dir, unix.MNT_DETACH)
 		delete(sv.views, c.dir)
 	}
+}
+
+// makeRootPrivate runs makePrivate on Root once, before the first mount
+// below it rather than at agent start (agent reachability does not wait).
+func (s *Server) makeRootPrivate() {
+	s.private.Do(func() { s.privateBind = makePrivate(s.cfg.Root) })
 }
 
 // makePrivate gives dir private mount propagation, bind-mounting it onto

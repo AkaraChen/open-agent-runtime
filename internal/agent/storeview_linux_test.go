@@ -37,6 +37,10 @@ func TestPrivateRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if isMountRoot(dir) {
+		t.Fatal("root bound at agent start; it should wait for the first mount")
+	}
+	s.makeRootPrivate()
 	b, _ := os.ReadFile("/proc/self/mountinfo")
 	var line string
 	for _, l := range strings.Split(string(b), "\n") {
@@ -55,6 +59,7 @@ func TestPrivateRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s2.makeRootPrivate()
 	if s2.privateBind {
 		t.Fatal("bound the root twice")
 	}
@@ -151,8 +156,8 @@ func BenchmarkStoreView(b *testing.B) {
 	}
 }
 
-// BenchmarkNew measures agent start on a fresh native root (it binds the
-// root onto itself); StopAll is not timed.
+// BenchmarkNew measures agent start on a fresh native root; StopAll is
+// not timed.
 func BenchmarkNew(b *testing.B) {
 	if os.Geteuid() != 0 {
 		b.Skip("needs root")
