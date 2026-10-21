@@ -45,22 +45,6 @@ func dirIno(t testing.TB, path string) uint64 {
 	return st.Ino
 }
 
-// waitViewBuilt waits until a donor's background rebuild has published the
-// view, then checks it.
-func waitViewBuilt(t testing.TB, s *Server, b *compose.Bundle) {
-	t.Helper()
-	for range 500 {
-		s.groups.mu.Lock()
-		building := s.groups.builds[b.StoreView] != nil
-		s.groups.mu.Unlock()
-		if _, err := os.Stat(b.StoreView + ".done"); err == nil && !building {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	checkView(t, b)
-}
-
 func checkView(t testing.TB, b *compose.Bundle) {
 	t.Helper()
 	entries, _ := os.ReadDir(b.StoreView)
@@ -96,10 +80,38 @@ func TestViewReuse(t *testing.T) {
 	if got := dirIno(t, filepath.Join(b.StoreView, name)); got != ino {
 		t.Fatalf("store path was linked again (inode %d, was %d), not moved", got, ino)
 	}
-	// a is whole again in the background, its store paths linked back
-	waitViewBuilt(t, s, a)
-	if got := dirIno(t, filepath.Join(a.StoreView, name)); got == ino {
-		t.Fatal("donor got the moved directory back")
+	// a is invalidated, and gone once the cleanup has run
+	s.cleanups.Wait()
+	if _, err := os.Stat(a.StoreView + ".done"); err == nil {
+		t.Fatal("donor still marked complete")
+	}
+	if _, err := os.Stat(a.StoreView); err == nil {
+		t.Fatal("donor still there")
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(a.StoreView), "store.tmp-*")); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+	// b is running: rolling back to a builds it from scratch and leaves b whole
+	os.MkdirAll(s.instDir("svc-1"), 0o755)
+	os.WriteFile(filepath.Join(s.instDir("svc-1"), viewMarker), []byte(b.StoreView), 0o644)
+	if err := s.ensureStoreView(a); err != nil {
+		t.Fatal(err)
+	}
+	checkView(t, a)
+	checkView(t, b)
+	if dirIno(t, filepath.Join(a.StoreView, name)) == ino {
+		t.Fatal("rebuilt view has the moved directory")
+	}
+	// b is not running: a takes from it in turn, and b is the one to rebuild
+	os.RemoveAll(s.instDir("svc-1"))
+	c := fakeClosure(t, s, "c", 0, 41)
+	if err := s.ensureStoreView(c); err != nil {
+		t.Fatal(err)
+	}
+	checkView(t, c)
+	s.cleanups.Wait()
+	if err := s.ensureStoreView(b); err != nil {
+		t.Fatal(err)
 	}
 	checkView(t, b)
 }
@@ -134,15 +146,14 @@ func TestViewReuseSkipsViewsInUse(t *testing.T) {
 		if dirIno(t, filepath.Join(a.StoreView, name)) != ino || dirIno(t, filepath.Join(b.StoreView, name)) == ino {
 			t.Fatalf("old=%v: a view in use was taken apart", old)
 		}
-		// the instance goes away: the next closure may take from a or b
+		// the instance goes away: the next closure may take from a
 		os.RemoveAll(dir)
 		c := fakeClosure(t, s, "c", 2, 42)
 		if err := s.ensureStoreView(c); err != nil {
 			t.Fatal(err)
 		}
 		checkView(t, c)
-		waitViewBuilt(t, s, a)
-		waitViewBuilt(t, s, b)
+		s.cleanups.Wait()
 	}
 }
 
@@ -182,20 +193,19 @@ func TestViewReuseWhilePreparing(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkView(t, b)
-	// rolling back at once takes over the donor's rebuild
+	s.cleanups.Wait()
+	// rolling back is a plain build
 	if err := s.ensureStoreView(a); err != nil {
 		t.Fatal(err)
 	}
 	checkView(t, a)
-	waitViewBuilt(t, s, b)
 }
 
-// A restart in the middle of a donor's rebuild leaves a directory without
-// its marker: the next request for it builds it from scratch.
+// A donor the agent left without its marker (killed after the steal) is
+// built from scratch by the next request for it.
 func TestViewReuseInterrupted(t *testing.T) {
 	s := plainServer(t)
 	a := fakeClosure(t, s, "a", 0, 40)
-	// a donor as the agent left it when it died: no marker, a few store paths
 	os.MkdirAll(filepath.Join(a.StoreView, filepath.Base(a.StoreLayers[0])), 0o755)
 	if err := s.ensureStoreView(a); err != nil {
 		t.Fatal(err)
@@ -205,8 +215,8 @@ func TestViewReuseInterrupted(t *testing.T) {
 
 // BenchmarkViewReuse times the view of a closure that differs from an
 // existing, unused one by one store path (120 paths of ~190 files): built
-// by linking everything, by taking from the donor, and the donor's
-// rebuild that follows (what a rollback right after waits for).
+// by linking everything, or by taking from the donor; and then the donor's
+// own view again, which a rollback pays for in full while the new closure runs.
 func BenchmarkViewReuse(b *testing.B) {
 	mk := func(s *Server, id string, from, to int) *compose.Bundle {
 		bundle := &compose.Bundle{StoreView: s.layout.StoreView(id)}
@@ -229,7 +239,7 @@ func BenchmarkViewReuse(b *testing.B) {
 	for _, reuse := range []bool{false, true} {
 		b.Run(fmt.Sprintf("reuse=%v", reuse), func(b *testing.B) {
 			s := plainServer(b)
-			var linking, steal, restore time.Duration
+			var build, rollback time.Duration
 			for i := 0; i < b.N; i++ {
 				a := mk(s, fmt.Sprintf("a%d", i), 0, 120)
 				if err := s.ensureStoreView(a); err != nil {
@@ -245,25 +255,27 @@ func BenchmarkViewReuse(b *testing.B) {
 				if err := s.ensureStoreView(nb); err != nil {
 					b.Fatal(err)
 				}
-				d := time.Since(t)
+				build += time.Since(t)
+				s.cleanups.Wait()
 				if reuse {
-					steal += d
+					// rolling back while the new closure runs: nothing to take from
+					os.MkdirAll(s.instDir("x"), 0o755)
+					os.WriteFile(filepath.Join(s.instDir("x"), viewMarker), []byte(nb.StoreView), 0o644)
 					t = time.Now()
-					waitViewBuilt(b, s, a)
-					restore += time.Since(t)
-				} else {
-					linking += d
-					os.RemoveAll(s.instDir("x"))
+					if err := s.ensureStoreView(a); err != nil {
+						b.Fatal(err)
+					}
+					rollback += time.Since(t)
 				}
-				os.RemoveAll(a.StoreView)
-				os.RemoveAll(a.StoreView + ".done")
-				os.RemoveAll(nb.StoreView)
-				os.RemoveAll(nb.StoreView + ".done")
+				os.RemoveAll(s.instDir("x"))
+				for _, v := range []string{a.StoreView, nb.StoreView} {
+					os.RemoveAll(v)
+					os.RemoveAll(v + ".done")
+				}
 			}
 			n := time.Duration(b.N)
-			b.ReportMetric(float64((linking / n).Microseconds())/1000, "link-ms")
-			b.ReportMetric(float64((steal / n).Microseconds())/1000, "reuse-ms")
-			b.ReportMetric(float64((restore / n).Microseconds())/1000, "donor-rebuild-ms")
+			b.ReportMetric(float64((build/n).Microseconds())/1000, "new-view-ms")
+			b.ReportMetric(float64((rollback/n).Microseconds())/1000, "rollback-ms")
 		})
 	}
 }
