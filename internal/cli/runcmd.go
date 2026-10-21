@@ -246,7 +246,9 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 // start of a freshly warmed bundle is as fast as later ones.
 func (s *session) precompose(ctx context.Context) error {
 	var res proto.ComposeResult
-	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: true}, &res)
+	// OAR_WARM_FLUSH=0 skips the end-of-warm flush (benchmark comparisons)
+	flush := os.Getenv("OAR_WARM_FLUSH") != "0"
+	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
 }
 
 func firstNonEmpty(a, b string) string {
