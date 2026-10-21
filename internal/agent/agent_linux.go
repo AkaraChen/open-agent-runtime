@@ -1033,6 +1033,13 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 			return nil, err
 		}
 	}
+	if b.StoreView != "" {
+		// before the view is requested: from now on it must not be taken apart
+		if err := os.WriteFile(filepath.Join(in.dir, viewMarker), []byte(b.StoreView), 0o644); err != nil {
+			os.RemoveAll(in.dir)
+			return nil, err
+		}
+	}
 	if seed != "" {
 		if out, err := exec.Command("cp", "-a", seed, filepath.Join(in.dir, "upper")).CombinedOutput(); err != nil {
 			os.RemoveAll(in.dir)

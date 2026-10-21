@@ -86,15 +86,22 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
+	moved := s.stealViews(tmp, b.StoreLayers, view)
+	var rest []string
+	for _, layer := range b.StoreLayers {
+		if !moved[filepath.Base(layer)] {
+			rest = append(rest, layer)
+		}
+	}
 	// store paths are linked in parallel: the cost is one syscall per file.
 	// PERF: they are handed out in the order of b.StoreLayers, biggest
 	// first (compose.StoreLayers), so that the build ends with small ones
 	// instead of waiting for a big one that was started late.
 	work := make(chan string)
-	errs := make(chan error, len(b.StoreLayers))
+	errs := make(chan error, len(rest))
 	var wg sync.WaitGroup
-	linkJobs.Add(int32(len(b.StoreLayers)))
-	for range min(runtime.NumCPU()*2, len(b.StoreLayers)) {
+	linkJobs.Add(int32(len(rest)))
+	for range min(runtime.NumCPU()*2, max(len(rest), 1)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -107,7 +114,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 			}
 		}()
 	}
-	for _, layer := range b.StoreLayers {
+	for _, layer := range rest {
 		work <- layer
 	}
 	close(work)
@@ -477,10 +484,14 @@ func (s *Server) prepareView(layers []string, view string) {
 		s.groups.mu.Unlock()
 		return
 	}
+	moved := s.stealViews(tmp, layers, view)
 	vb := &viewBuild{tmp: tmp, done: make(chan struct{}), pending: map[string]bool{}}
 	for _, l := range layers {
-		vb.pending[l] = true
+		if !moved[filepath.Base(l)] {
+			vb.pending[l] = true
+		}
 	}
+	vb.finish() // nothing to link when the donor had it all
 	if s.groups.builds == nil {
 		s.groups.builds = map[string]*viewBuild{}
 	}
@@ -518,6 +529,21 @@ func (vb *viewBuild) link(layer string) { vb.linkAll([]string{layer}) }
 // the scheduler runs those goroutines, and a big store path could be left
 // for the end of the build.
 func (vb *viewBuild) linkAll(layers []string) {
+	jobs := vb.claim(layers)
+	if len(jobs) == 0 {
+		return
+	}
+	go func() {
+		for _, layer := range jobs {
+			viewLinkers <- struct{}{}
+			go vb.run(layer)
+		}
+	}()
+}
+
+// claim takes those of layers that are still pending and present off the
+// pending set and counts them as link jobs, which the caller runs.
+func (vb *viewBuild) claim(layers []string) []string {
 	var jobs []string
 	vb.mu.Lock()
 	for _, layer := range layers {
@@ -533,15 +559,7 @@ func (vb *viewBuild) linkAll(layers []string) {
 	vb.inflight += len(jobs)
 	linkJobs.Add(int32(len(jobs)))
 	vb.mu.Unlock()
-	if len(jobs) == 0 {
-		return
-	}
-	go func() {
-		for _, layer := range jobs {
-			viewLinkers <- struct{}{}
-			go vb.run(layer)
-		}
-	}()
+	return jobs
 }
 
 // run links layer into the view, in a slot of viewLinkers that it frees.
