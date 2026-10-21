@@ -177,6 +177,10 @@ func (m *vzMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 
 func (m *vzMachine) Done() <-chan struct{} { return m.done }
 
+// Transport reports the control channel (VZ's vsock: a slow path on the
+// hosts measured so far, 20-35 MB/s).
+func (m *vzMachine) Transport() string { return "vz-vsock" }
+
 // GuestNetwork reports that the guest's NAT address is reachable from the
 // host, so ingress ports are proxied to it directly.
 func (m *vzMachine) GuestNetwork() bool { return os.Getenv("OAR_VZ_FORWARD") != "channel" }

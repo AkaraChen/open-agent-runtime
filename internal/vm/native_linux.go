@@ -74,6 +74,9 @@ func (native) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	return m, nil
 }
 
+// Transport reports the control channel.
+func (m *nativeMachine) Transport() string { return "inprocess" }
+
 func (m *nativeMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 	select {
 	case <-m.done:

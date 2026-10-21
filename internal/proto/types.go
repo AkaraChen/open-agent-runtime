@@ -88,6 +88,10 @@ type WarmPutArgs struct {
 	// Writeback starts writing extracted file data back while the warm
 	// continues (instead of leaving it all to a final flush).
 	Writeback bool `json:"writeback,omitempty"`
+	// Encoding of the body: "" (the tar itself) or "zstd"; RawSize is
+	// then the tar's size, which the checksum and size checks apply to.
+	Encoding string `json:"encoding,omitempty"`
+	RawSize  int64  `json:"rawSize,omitempty"`
 }
 
 // ComposeArgs composes a bundle from a platform lock.

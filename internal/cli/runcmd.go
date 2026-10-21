@@ -131,8 +131,11 @@ type warmStats struct {
 	// Upload is the wall time of the uploads; View and Flush split the
 	// guest side of Precompose.
 	Upload time.Duration `json:"upload,omitempty"`
-	View   time.Duration `json:"view,omitempty"`
-	Flush  time.Duration `json:"flush,omitempty"`
+	// Wire is the bytes sent (less than Bytes when compressed).
+	Wire       int64         `json:"wire,omitempty"`
+	Compressed bool          `json:"compressed,omitempty"`
+	View       time.Duration `json:"view,omitempty"`
+	Flush      time.Duration `json:"flush,omitempty"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -180,6 +183,8 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
+	compress := warmCompression(s.g)
+	var wire atomic.Int64
 	tUpload := time.Now()
 	eg, ectx := errgroup.WithContext(ctx)
 	eg.SetLimit(4)
@@ -192,7 +197,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 				return fmt.Errorf("artifact %s missing locally (%w); run oar build", p, err)
 			}
 			var pr proto.WarmPutResult
-			if err := s.putWithRetry(ectx, it, p, &pr); err != nil {
+			if err := s.putWithRetry(ectx, it, p, compress, &wire, &pr); err != nil {
 				return fmt.Errorf("warm %s %s: %w", it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), err)
 			}
 			files.Add(int64(pr.Files))
@@ -223,6 +228,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 		stats.Precompose = time.Since(t)
 	}
 	stats.Bytes = sent.Load()
+	stats.Wire, stats.Compressed = wire.Load(), compress
 	stats.Files = files.Load()
 	stats.GuestTime = time.Duration(guest.Load())
 	stats.Duration = time.Since(start)
@@ -231,11 +237,23 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 
 // putWithRetry uploads one artifact, retrying transport failures. Errors
 // reported by the agent itself (e.g. checksum mismatch) are not retried.
-func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, res *proto.WarmPutResult) error {
+func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, compress bool, wire *atomic.Int64, res *proto.WarmPutResult) error {
+	// OAR_WARM_WRITEBACK=1: the agent writes data back during the warm
+	args := proto.WarmPutArgs{Item: it, Writeback: os.Getenv("OAR_WARM_WRITEBACK") == "1"}
+	body := p
+	if compress {
+		raw, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		if z, err := zstdArtifact(p); err == nil {
+			body, args.Encoding, args.RawSize = z, "zstd", raw.Size()
+		} // else send it as it is
+	}
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
 		err = func() error {
-			f, err := os.Open(p)
+			f, err := os.Open(body)
 			if err != nil {
 				return err
 			}
@@ -244,9 +262,11 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 			if err != nil {
 				return err
 			}
-			// OAR_WARM_WRITEBACK=1: the agent writes data back during the warm
-			wb := os.Getenv("OAR_WARM_WRITEBACK") == "1"
-			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it, Writeback: wb}, f, fi.Size(), res, nil)
+			if err := s.client.CallBody(ctx, proto.OpWarmPut, args, f, fi.Size(), res, nil); err != nil {
+				return err
+			}
+			wire.Add(fi.Size())
+			return nil
 		}()
 		var re *proto.RemoteError
 		if err == nil || errors.As(err, &re) || ctx.Err() != nil {

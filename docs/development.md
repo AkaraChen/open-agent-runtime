@@ -89,6 +89,9 @@ $ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
 | `OAR_QEMU`, `OAR_QEMU_ACCEL`, `OAR_QEMU_TRANSPORT` | QEMU binary, accelerator, `tcp` transport |
 | `OAR_QEMU_FORWARD`, `OAR_VZ_FORWARD` | `channel`: tunnel ingress ports through the control channel instead of QEMU's own port forwarding / a direct connection to the VZ guest |
 | `OAR_QEMU_MACHINE` | `q35` or `microvm`: machine type for amd64 guests (default: `microvm` with KVM, `q35` otherwise) |
+| `OAR_WARM_COMPRESS` | `1` or `0`: compress warm uploads with zstd (default: only over slow control channels, VZ and QEMU port forwarding; the compressed copy is cached as `<artifact>.zst`) |
+| `OAR_WARM_WRITEBACK` | `1`: the agent starts writing extracted data back during the warm |
+| `OAR_VIEW_PREPARE` | `0`: build the store view only at the end of a warm (comparisons) |
 | `OAR_WARM_FLUSH` | `0`: skip writing the guest cache back at the end of a warm (comparisons) |
 | `OAR_QEMU_MICROVM_PCIE` | `0`: microvm devices use virtio-mmio instead of its PCIe bridge |
 | `OAR_GUEST_CMDLINE` | extra guest kernel parameters (QEMU and VZ backends; debugging) |

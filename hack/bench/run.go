@@ -739,6 +739,8 @@ type warmOut struct {
 	Status     float64 `json:"status"`
 	Precompose float64 `json:"precompose"`
 	Upload     float64 `json:"upload"`
+	Wire       int64   `json:"wire"`
+	Compressed bool    `json:"compressed"`
 	View       float64 `json:"view"`
 	Flush      float64 `json:"flush"`
 }
@@ -752,6 +754,10 @@ func (b *bench) phaseWarm() error {
 		return err
 	}
 	b.add(g, "cold", "冷预热完整组合", "s", true, wall.Seconds()).Note = fmt.Sprintf("%d 个产物，%.0f MiB，%d 个文件", w.Uploaded, float64(w.Bytes)/(1<<20), w.Files)
+	if w.Compressed && w.Wire > 0 {
+		b.add(g, "cold.wire", "　实际传输（zstd 压缩，含首次压缩）", "MiB", true, float64(w.Wire)/(1<<20)).Note =
+			fmt.Sprintf("压缩比 %.2f", float64(w.Bytes)/float64(w.Wire))
+	}
 	if w.Upload > 0 {
 		b.add(g, "cold.upload", "　其中：上传并解包（4 路并发）", "s", true, w.Upload/1e9)
 		b.add(g, "cold.view", "　其中：等待 store 视图完成", "ms", true, w.View/1e6)

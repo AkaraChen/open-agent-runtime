@@ -282,6 +282,14 @@ func (m *qemuMachine) DialAgent(ctx context.Context) (net.Conn, error) {
 
 func (m *qemuMachine) Done() <-chan struct{} { return m.done }
 
+// Transport reports the control channel.
+func (m *qemuMachine) Transport() string {
+	if m.tcpAddr != "" {
+		return "tcp"
+	}
+	return "vsock"
+}
+
 // Ready is closed when the guest agent reports that it listens (nil when
 // the transport needs no report).
 func (m *qemuMachine) Ready() <-chan struct{} { return m.ready }

@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sys/unix"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
@@ -148,7 +149,22 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.warmPut(a.Item, a.Writeback, body, req.BodySize)
+		size := req.BodySize
+		switch a.Encoding {
+		case "":
+		case "zstd":
+			dec, err := zstd.NewReader(body, zstd.WithDecoderConcurrency(1))
+			if err != nil {
+				return nil, err
+			}
+			defer dec.Close()
+			// the encoded stream is read to its end by warmPut, which
+			// drains whatever follows the tar
+			body, size = dec, a.RawSize
+		default:
+			return nil, fmt.Errorf("unsupported warm encoding %q", a.Encoding)
+		}
+		return s.warmPut(a.Item, a.Writeback, body, size)
 	case proto.OpCompose:
 		var a proto.ComposeArgs
 		if err := proto.Decode(req, &a); err != nil {

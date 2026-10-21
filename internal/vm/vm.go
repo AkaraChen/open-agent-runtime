@@ -157,6 +157,9 @@ type State struct {
 	Phases map[string]time.Duration `json:"phases,omitempty"`
 	Config MachineConfig            `json:"config"`
 	Error  string                   `json:"error,omitempty"`
+	// Transport is the control channel: "vsock", "tcp" (a port forward)
+	// or "inprocess"; clients use it to decide whether to compress.
+	Transport string `json:"transport,omitempty"`
 }
 
 // ReadState loads the state of a VM.
@@ -225,6 +228,9 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 	defer stopWatch()
 	m, err := b.Boot(ctx, cfg)
 	st.Phases["machineStarted"] = time.Since(st.Started)
+	if t, ok := m.(interface{ Transport() string }); ok {
+		st.Transport = t.Transport()
+	}
 	if err != nil {
 		return fail(fmt.Errorf("boot: %w", err))
 	}
