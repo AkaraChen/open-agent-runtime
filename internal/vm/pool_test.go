@@ -36,16 +36,8 @@ func TestAlive(t *testing.T) {
 		t.Fatal("closed connection reported alive")
 	}
 
-	// no socket access (like VZ): short-deadline read
-	c2, s2 := dial()
-	defer c2.Close()
-	w := struct{ net.Conn }{c2} // hides syscall.Conn
-	if !alive(w) {
-		t.Fatal("open wrapped connection reported dead")
-	}
-	s2.Close()
-	time.Sleep(10 * time.Millisecond)
-	if alive(w) {
-		t.Fatal("closed wrapped connection reported alive")
+	// no socket access (like VZ): assumed open
+	if !alive(struct{ net.Conn }{c}) {
+		t.Fatal("connection without socket access reported dead")
 	}
 }

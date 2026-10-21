@@ -2,7 +2,6 @@ package vm
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"time"
@@ -110,22 +109,13 @@ func (p *connPool) close() {
 
 // alive reports whether an idle connection is still open. The agent never
 // sends unsolicited data, so pending EOF means the guest side closed the
-// connection while it sat in the pool (it would otherwise fail the request
-// it is used for).
+// connection while it sat in the pool. Only connections whose socket can be
+// peeked at without blocking are checked (vsock, TCP); others (VZ, the
+// native backend's in-process pipes) are assumed open, since any wait here
+// would be paid by every request.
 func alive(c net.Conn) bool {
-	if c.LocalAddr().Network() == "pipe" {
-		return true // in-process agent (native backend): cannot go stale
-	}
 	if closed, ok := peekClosed(c); ok {
 		return !closed
 	}
-	// no access to the socket (VZ): a read with a very short deadline
-	if err := c.SetReadDeadline(time.Now().Add(100 * time.Microsecond)); err != nil {
-		return true // cannot tell; let the request find out
-	}
-	var b [1]byte
-	_, err := c.Read(b[:])
-	c.SetReadDeadline(time.Time{})
-	var ne net.Error
-	return errors.As(err, &ne) && ne.Timeout()
+	return true
 }
