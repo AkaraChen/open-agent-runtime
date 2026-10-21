@@ -92,7 +92,7 @@ $ OAR_QEMU_TRANSPORT=tcp GUEST_ARCH=arm64 BACKEND=qemu hack/e2e.sh
 | `OAR_WARM_COMPRESS` | `1` or `0`: compress warm uploads with zstd (default: only over slow control channels, VZ and QEMU port forwarding; the compressed copy is cached as `<artifact>.zst`) |
 | `OAR_WARM_WRITEBACK` | `1`: the agent starts writing extracted data back during the warm |
 | `OAR_VIEW_PREPARE` | `0`: build the store view only at the end of a warm (comparisons) |
-| `OAR_WARM_FLUSH` | `0`: skip writing the guest cache back at the end of a warm (comparisons) |
+| `OAR_WARM_FLUSH` | `1`: write the guest cache back at the end of a warm (off by default: nothing on the start path waits for it) |
 | `OAR_QEMU_MICROVM_PCIE` | `0`: microvm devices use virtio-mmio instead of its PCIe bridge |
 | `OAR_GUEST_CMDLINE` | extra guest kernel parameters (QEMU and VZ backends; debugging) |
 | `OAR_STORE_VIEW` | `binds`: containers see their closure through one bind mount per store path instead of a hard-link tree (read at `vm start`; for comparisons) |
