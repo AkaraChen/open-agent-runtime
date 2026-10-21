@@ -59,7 +59,7 @@ func TestPrivateRoot(t *testing.T) {
 		t.Fatal("bound the root twice")
 	}
 	s.StopAll(context.Background())
-	if isMountpoint(dir) {
+	if isMountpoint(dir) || isMountRoot(dir) {
 		t.Fatal("root still mounted after StopAll")
 	}
 }
@@ -108,13 +108,10 @@ func TestStoreView(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(b.StoreView, "new"), nil, 0o644); !errors.Is(err, unix.EROFS) {
 		t.Fatalf("create in the view: %v, want EROFS", err)
 	}
-	// an agent restart removes the old view and rebuilds it on demand
+	// an agent restart rebuilds the view over the old one
 	s2, err := New(s.cfg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if isMountpoint(b.StoreView) {
-		t.Fatal("view of the previous agent still mounted")
 	}
 	if err := s2.ensureStoreView(b); err != nil {
 		t.Fatal(err)
@@ -151,5 +148,23 @@ func BenchmarkStoreView(b *testing.B) {
 			b.Fatal(err)
 		}
 		i++
+	}
+}
+
+// BenchmarkNew measures agent start on a fresh native root (it binds the
+// root onto itself); StopAll is not timed.
+func BenchmarkNew(b *testing.B) {
+	if os.Geteuid() != 0 {
+		b.Skip("needs root")
+	}
+	dir := b.TempDir()
+	for i := 0; i < b.N; i++ {
+		s, err := New(Config{Root: dir, Mode: "native", Runc: Runc{Root: dir + "/runc"}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		s.StopAll(context.Background())
+		b.StartTimer()
 	}
 }

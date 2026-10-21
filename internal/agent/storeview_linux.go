@@ -49,8 +49,11 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		v.used = time.Now()
 		return nil
 	}
-	// New removed the views of a previous agent, so nothing is mounted
-	// here (reading mountinfo to check would cost more than the mounts)
+	// a view left mounted by a previous agent (possibly half built) is
+	// rebuilt; running containers keep their own copy of the mounts
+	if isMountRoot(b.StoreView) {
+		unix.Unmount(b.StoreView, unix.MNT_DETACH)
+	}
 	if err := s.mountStoreView(b); err != nil {
 		unix.Unmount(b.StoreView, unix.MNT_DETACH)
 		return err
@@ -136,11 +139,8 @@ func (s *Server) pruneStoreViewsLocked() {
 // leaks the mounts into those namespaces. Best effort: needs
 // CAP_SYS_ADMIN.
 func makePrivate(dir string) bool {
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = real // mountinfo shows resolved paths
-	}
 	bound := false
-	if !isMountpoint(dir) {
+	if !isMountRoot(dir) {
 		if unix.Mount(dir, dir, "", unix.MS_BIND, "") != nil {
 			return false
 		}
@@ -148,6 +148,23 @@ func makePrivate(dir string) bool {
 	}
 	unix.Mount("", dir, "", unix.MS_REC|unix.MS_PRIVATE, "")
 	return bound
+}
+
+// isMountRoot reports whether path is the root of a mount, with one statx
+// call (reading mountinfo costs ~0.5 ms per read on a host with a few
+// hundred mounts); before Linux 5.8 it falls back to mountinfo.
+func isMountRoot(path string) bool {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, 0, &st); err != nil {
+		return false
+	}
+	if st.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT != 0 {
+		return st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real // mountinfo shows resolved paths
+	}
+	return isMountpoint(path)
 }
 
 // isMountpoint reports whether dir is a mount point.
@@ -212,8 +229,8 @@ func unescapeMountinfo(s string) string {
 	return b.String()
 }
 
-// unmountAllStoreViews removes every store view mount (agent start and
-// shutdown). Running containers keep their own copies of the mounts.
+// unmountAllStoreViews removes every store view mount (agent shutdown).
+// Running containers keep their own copies of the mounts.
 func (s *Server) unmountAllStoreViews() {
 	s.views.mu.Lock()
 	defer s.views.mu.Unlock()

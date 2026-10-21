@@ -465,12 +465,24 @@ func (b *bench) phaseBuild() error {
 	if err == nil {
 		b.add(g, "noop", "无变化重建", "ms", true, ms(wall))
 	}
-	// incremental: drop a component
-	nogit := b.writeConfig("nogit", cfgOpts{drop: "nix:git", env: map[string]string{"VARIANT": "nogit"}})
-	o2, wall, err := b.build("nogit", nogit)
-	if err == nil {
-		b.add(g, "incr.remove", "增量构建：删除一个组件（nix:git）", "ms", true, ms(wall)).Note =
-			fmt.Sprintf("下载 %d 个 path，求值 %d 个属性", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr)
+	// incremental: drop a component; three combos (they differ only in an
+	// env var) so one noisy sample does not decide
+	var removes []float64
+	var o2 *buildOut
+	for _, name := range []string{"nogit", "nogit-2", "nogit-3"} {
+		cfg := b.writeConfig(name, cfgOpts{drop: "nix:git", env: map[string]string{"VARIANT": name}})
+		o, wall, err := b.build(name, cfg)
+		if err != nil {
+			break
+		}
+		if o2 == nil {
+			o2 = o
+		}
+		removes = append(removes, ms(wall))
+	}
+	if o2 != nil {
+		b.add(g, "incr.remove", "增量构建：删除一个组件（nix:git，3 个组合）", "ms", true, removes...).Note =
+			fmt.Sprintf("第一个：下载 %d 个 path，求值 %d 个属性", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr)
 	}
 	// add a package that was never evaluated
 	hello := b.writeConfig("hello", cfgOpts{extra: []string{"nix:hello"}, env: map[string]string{"VARIANT": "hello"}})
