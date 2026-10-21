@@ -85,6 +85,9 @@ type WarmStatusResult struct {
 // WarmPutArgs precedes a tarball body.
 type WarmPutArgs struct {
 	Item WarmItem `json:"item"`
+	// Writeback starts writing extracted file data back while the warm
+	// continues (instead of leaving it all to a final flush).
+	Writeback bool `json:"writeback,omitempty"`
 }
 
 // ComposeArgs composes a bundle from a platform lock.

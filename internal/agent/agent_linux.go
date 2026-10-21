@@ -148,7 +148,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.warmPut(a.Item, body, req.BodySize)
+		return s.warmPut(a.Item, a.Writeback, body, req.BodySize)
 	case proto.OpCompose:
 		var a proto.ComposeArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -324,10 +324,10 @@ func (s *Server) warmStatus(a proto.WarmStatusArgs) proto.WarmStatusResult {
 
 // warmPut receives a tarball, verifies its sha256 against the key while
 // extracting it into a staging directory, then atomically publishes it.
-func (s *Server) warmPut(it proto.WarmItem, body io.Reader, size int64) (*proto.WarmPutResult, error) {
+func (s *Server) warmPut(it proto.WarmItem, writeback bool, body io.Reader, size int64) (*proto.WarmPutResult, error) {
 	start := time.Now()
 	res := &proto.WarmPutResult{}
-	err := s.warmPutInto(it, body, size, res)
+	err := s.warmPutInto(it, writeback, body, size, res)
 	res.Duration = time.Since(start)
 	if err != nil {
 		return nil, err
@@ -335,7 +335,7 @@ func (s *Server) warmPut(it proto.WarmItem, body io.Reader, size int64) (*proto.
 	return res, nil
 }
 
-func (s *Server) warmPutInto(it proto.WarmItem, body io.Reader, size int64, res *proto.WarmPutResult) error {
+func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, size int64, res *proto.WarmPutResult) error {
 	final, err := s.itemPath(it)
 	if err != nil {
 		return err
@@ -367,7 +367,7 @@ func (s *Server) warmPutInto(it proto.WarmItem, body io.Reader, size int64, res 
 			return err
 		}
 	}
-	files, err := extractTar(&cr, extractRoot)
+	files, err := extractTarOpt(&cr, extractRoot, writeback)
 	if err != nil {
 		return fmt.Errorf("extract %s %s: %w", it.Kind, it.Key, err)
 	}

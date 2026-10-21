@@ -244,7 +244,9 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 			if err != nil {
 				return err
 			}
-			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it}, f, fi.Size(), res, nil)
+			// OAR_WARM_WRITEBACK=1: the agent writes data back during the warm
+			wb := os.Getenv("OAR_WARM_WRITEBACK") == "1"
+			return s.client.CallBody(ctx, proto.OpWarmPut, proto.WarmPutArgs{Item: it, Writeback: wb}, f, fi.Size(), res, nil)
 		}()
 		var re *proto.RemoteError
 		if err == nil || errors.As(err, &re) || ctx.Err() != nil {
