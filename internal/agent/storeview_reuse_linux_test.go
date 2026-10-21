@@ -202,3 +202,68 @@ func TestViewReuseInterrupted(t *testing.T) {
 	}
 	checkView(t, a)
 }
+
+// BenchmarkViewReuse times the view of a closure that differs from an
+// existing, unused one by one store path (120 paths of ~190 files): built
+// by linking everything, by taking from the donor, and the donor's
+// rebuild that follows (what a rollback right after waits for).
+func BenchmarkViewReuse(b *testing.B) {
+	mk := func(s *Server, id string, from, to int) *compose.Bundle {
+		bundle := &compose.Bundle{StoreView: s.layout.StoreView(id)}
+		for i := from; i < to; i++ {
+			name := fmt.Sprintf("%032d-p%d", i, i)
+			dir := filepath.Join(s.layout.StorePath(name), "lib")
+			if _, err := os.Stat(dir); err != nil {
+				for d := 0; d < 10; d++ {
+					os.MkdirAll(filepath.Join(dir, fmt.Sprint(d)), 0o755)
+					for f := 0; f < 19; f++ {
+						os.WriteFile(filepath.Join(dir, fmt.Sprint(d), fmt.Sprint(f)), []byte(name), 0o644)
+					}
+				}
+				os.WriteFile(filepath.Join(s.layout.StorePath(name), "f"), []byte(name), 0o644)
+			}
+			bundle.StoreLayers = append(bundle.StoreLayers, s.layout.StoreLayer(name))
+		}
+		return bundle
+	}
+	for _, reuse := range []bool{false, true} {
+		b.Run(fmt.Sprintf("reuse=%v", reuse), func(b *testing.B) {
+			s := plainServer(b)
+			var linking, steal, restore time.Duration
+			for i := 0; i < b.N; i++ {
+				a := mk(s, fmt.Sprintf("a%d", i), 0, 120)
+				if err := s.ensureStoreView(a); err != nil {
+					b.Fatal(err)
+				}
+				nb := mk(s, fmt.Sprintf("b%d", i), 1, 121)
+				if !reuse {
+					// as if a were in use
+					os.MkdirAll(s.instDir("x"), 0o755)
+					os.WriteFile(filepath.Join(s.instDir("x"), viewMarker), []byte(a.StoreView), 0o644)
+				}
+				t := time.Now()
+				if err := s.ensureStoreView(nb); err != nil {
+					b.Fatal(err)
+				}
+				d := time.Since(t)
+				if reuse {
+					steal += d
+					t = time.Now()
+					waitViewBuilt(b, s, a)
+					restore += time.Since(t)
+				} else {
+					linking += d
+					os.RemoveAll(s.instDir("x"))
+				}
+				os.RemoveAll(a.StoreView)
+				os.RemoveAll(a.StoreView + ".done")
+				os.RemoveAll(nb.StoreView)
+				os.RemoveAll(nb.StoreView + ".done")
+			}
+			n := time.Duration(b.N)
+			b.ReportMetric(float64((linking / n).Microseconds())/1000, "link-ms")
+			b.ReportMetric(float64((steal / n).Microseconds())/1000, "reuse-ms")
+			b.ReportMetric(float64((restore / n).Microseconds())/1000, "donor-rebuild-ms")
+		})
+	}
+}
