@@ -183,7 +183,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
-	compress := warmCompression(s.g)
+	compress, writeback := warmCompression(s.g), warmWriteback(s.g)
 	var wire atomic.Int64
 	tUpload := time.Now()
 	eg, ectx := errgroup.WithContext(ctx)
@@ -197,7 +197,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 				return fmt.Errorf("artifact %s missing locally (%w); run oar build", p, err)
 			}
 			var pr proto.WarmPutResult
-			if err := s.putWithRetry(ectx, it, p, compress, &wire, &pr); err != nil {
+			if err := s.putWithRetry(ectx, it, p, compress, writeback, &wire, &pr); err != nil {
 				return fmt.Errorf("warm %s %s: %w", it.Kind, firstNonEmpty(it.Name, shortKey(it.Key)), err)
 			}
 			files.Add(int64(pr.Files))
@@ -237,9 +237,8 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 
 // putWithRetry uploads one artifact, retrying transport failures. Errors
 // reported by the agent itself (e.g. checksum mismatch) are not retried.
-func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, compress bool, wire *atomic.Int64, res *proto.WarmPutResult) error {
-	// OAR_WARM_WRITEBACK=1: the agent writes data back during the warm
-	args := proto.WarmPutArgs{Item: it, Writeback: os.Getenv("OAR_WARM_WRITEBACK") == "1"}
+func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string, compress, writeback bool, wire *atomic.Int64, res *proto.WarmPutResult) error {
+	args := proto.WarmPutArgs{Item: it, Writeback: writeback}
 	body := p
 	if compress {
 		raw, err := os.Stat(p)

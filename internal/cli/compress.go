@@ -92,3 +92,23 @@ func warmFlush(g *globalOpts) bool {
 	}
 	return st.Transport != "inprocess"
 }
+
+// warmWriteback reports whether the agent syncs the guest cache in the
+// background while a warm uploads, so the final flush has only the tail
+// left: OAR_WARM_WRITEBACK=1 or 0 forces it. Same-runner A/B: kvm cold warm
+// 3.8 -> 2.7 s and QEMU 49 -> 36 s (the final flush 1.45 s -> 21 ms and
+// 2.1 s -> 0.14 s), but VZ 37 -> 43 s and native (which does not flush)
+// 1.6 -> 2.3 s, so only QEMU-based guests use it.
+func warmWriteback(g *globalOpts) bool {
+	switch os.Getenv("OAR_WARM_WRITEBACK") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	st, err := vm.ReadState(vmDir(g))
+	if err != nil {
+		return false
+	}
+	return st.Transport == "vsock" || st.Transport == "tcp"
+}
