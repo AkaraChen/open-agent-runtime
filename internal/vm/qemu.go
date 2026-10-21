@@ -143,10 +143,13 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		machine, console = "q35,accel="+accel, "ttyS0"
 		want := os.Getenv("OAR_QEMU_MACHINE")
 		if want == "microvm" || want == "" && accel == "kvm" {
-			machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
-			if os.Getenv("OAR_QEMU_MICROVM_PCIE") == "1" {
-				// virtio-pci (MSI) on microvm's PCIe host bridge (comparison)
-				machine, bus = "microvm,accel="+accel+",pcie=on,rtc=on", "-pci"
+			// devices on microvm's PCIe host bridge (virtio-pci with MSI):
+			// guest connections take half as long as with virtio-mmio's
+			// legacy interrupts (0.10 vs 0.23 ms per connect) for 12 ms of
+			// kernel boot; OAR_QEMU_MICROVM_PCIE=0 selects virtio-mmio
+			machine, bus = "microvm,accel="+accel+",pcie=on,rtc=on", "-pci"
+			if os.Getenv("OAR_QEMU_MICROVM_PCIE") == "0" {
+				machine, bus = "microvm,accel="+accel+",pcie=off,rtc=on", "-device"
 			}
 		}
 	case "arm64":
