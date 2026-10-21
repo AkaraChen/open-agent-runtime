@@ -27,7 +27,8 @@ import (
 
 type storeGroups struct {
 	mu      sync.Mutex
-	mounted map[string]bool // views known to be complete
+	mounted map[string]bool       // views known to be complete
+	builds  map[string]*viewBuild // views being built ahead of a precompose
 }
 
 // ensureStoreView builds the bundle's /nix/store view if it is missing.
@@ -43,6 +44,28 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 	}
 	if s.groups.mounted[view] {
 		return nil
+	}
+	if vb := s.groups.builds[view]; vb != nil {
+		// started by view.prepare during the warm: let it finish (with
+		// groups.mu held, like a build done here; link jobs do not take it)
+		delete(s.groups.builds, view)
+		for _, layer := range b.StoreLayers {
+			vb.link(layer) // any layer it has not seen arrive
+		}
+		vb.mu.Lock()
+		if len(vb.pending) > 0 { // compose checked that all are warm
+			if vb.err == nil {
+				vb.err = fmt.Errorf("store view: %d store paths missing", len(vb.pending))
+			}
+			vb.pending = nil
+			vb.finish()
+		}
+		vb.mu.Unlock()
+		<-vb.done
+		if vb.err == nil {
+			return s.publishView(vb.tmp, view, view+".done")
+		}
+		os.RemoveAll(vb.tmp) // build it here instead
 	}
 	// the marker is written after the view is complete; a view without it
 	// is partial or left by an older layout (a mount point)
@@ -334,4 +357,119 @@ func (s *Server) flushCache() {
 	}
 	defer f.Close()
 	unix.Syncfs(int(f.Fd()))
+}
+
+// A viewBuild links a closure's store paths into a view as they become
+// available: those already in the cache at once, the others as soon as
+// their upload is published. A cold warm thereby builds the view while it
+// is still transferring, and its precompose only waits for the remainder.
+type viewBuild struct {
+	tmp      string
+	done     chan struct{} // closed when no layer is pending or in flight
+	mu       sync.Mutex
+	pending  map[string]bool
+	inflight int
+	closed   bool
+	err      error
+}
+
+// viewLinkers bounds concurrent link jobs across all view builds.
+var viewLinkers = make(chan struct{}, runtime.NumCPU()*2)
+
+// prepareView starts building view for layers unless it exists or is
+// already being built (links-mode views only).
+func (s *Server) prepareView(layers []string, view string) {
+	if len(layers) == 0 || s.layout.StoreMode != "" {
+		return
+	}
+	s.groups.mu.Lock()
+	if s.groups.mounted[view] || s.groups.builds[view] != nil {
+		s.groups.mu.Unlock()
+		return
+	}
+	if _, err := os.Stat(view + ".done"); err == nil {
+		s.groups.mu.Unlock()
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(view), 0o755); err != nil {
+		s.groups.mu.Unlock()
+		return
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(view), "store.tmp-")
+	if err != nil {
+		s.groups.mu.Unlock()
+		return
+	}
+	vb := &viewBuild{tmp: tmp, done: make(chan struct{}), pending: map[string]bool{}}
+	for _, l := range layers {
+		vb.pending[l] = true
+	}
+	if s.groups.builds == nil {
+		s.groups.builds = map[string]*viewBuild{}
+	}
+	// registered before looking at the cache: a store path published in
+	// between is linked either by layerReady or by the loop below
+	s.groups.builds[view] = vb
+	s.groups.mu.Unlock()
+	for _, l := range layers {
+		if _, err := os.Lstat(l); err == nil {
+			vb.link(l)
+		}
+	}
+}
+
+// layerReady links a newly published store path into the views being
+// built that need it.
+func (s *Server) layerReady(layer string) {
+	s.groups.mu.Lock()
+	var builds []*viewBuild
+	for _, vb := range s.groups.builds {
+		builds = append(builds, vb)
+	}
+	s.groups.mu.Unlock()
+	for _, vb := range builds {
+		vb.link(layer)
+	}
+}
+
+// link links layer into the view in the background if it is still
+// pending and present.
+func (vb *viewBuild) link(layer string) {
+	vb.mu.Lock()
+	if !vb.pending[layer] {
+		vb.mu.Unlock()
+		return
+	}
+	if _, err := os.Lstat(layer); err != nil {
+		vb.mu.Unlock()
+		return // not uploaded yet
+	}
+	delete(vb.pending, layer)
+	vb.inflight++
+	vb.mu.Unlock()
+	go func() {
+		viewLinkers <- struct{}{}
+		name := filepath.Base(layer)
+		var dirs []dirMode
+		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
+		for i := len(dirs) - 1; i >= 0; i-- {
+			os.Chmod(dirs[i].path, dirs[i].mode)
+		}
+		<-viewLinkers
+		vb.mu.Lock()
+		if err != nil && vb.err == nil {
+			vb.err = fmt.Errorf("store view %s: %w", name, err)
+		}
+		vb.inflight--
+		vb.finish()
+		vb.mu.Unlock()
+	}()
+}
+
+// finish closes done once nothing is pending or in flight (vb.mu held).
+func (vb *viewBuild) finish() {
+	if !vb.closed && vb.inflight == 0 && len(vb.pending) == 0 {
+		vb.closed = true
+		close(vb.done)
+	}
 }

@@ -160,3 +160,46 @@ func BenchmarkNew(b *testing.B) {
 		b.StartTimer()
 	}
 }
+
+func TestPrepareView(t *testing.T) {
+	s := rootServer(t)
+	b := fakeBundle(t, s, "p", 40)
+	// half the store paths "arrive" after the view build started
+	late := b.StoreLayers[20:]
+	for _, l := range late {
+		os.Rename(l, l+".uploading")
+	}
+	s.prepareView(b.StoreLayers, b.StoreView)
+	for _, l := range late {
+		os.Rename(l+".uploading", l)
+		s.layerReady(l)
+	}
+	if err := s.ensureStoreView(b); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(b.StoreView)
+	if len(entries) != 40 {
+		t.Fatalf("%d store paths in the view, want 40", len(entries))
+	}
+	for _, l := range b.StoreLayers {
+		name := filepath.Base(l)
+		if got, _ := os.ReadFile(filepath.Join(b.StoreView, name, "f")); string(got) != name {
+			t.Fatalf("%s: read %q", name, got)
+		}
+	}
+	if _, err := os.Stat(b.StoreView + ".done"); err != nil {
+		t.Fatal("view not marked complete")
+	}
+	// a store path that never arrives: the precompose builds it itself
+	b2 := fakeBundle(t, s, "q", 5)
+	missing := b2.StoreLayers[4]
+	os.Rename(missing, missing+".gone")
+	s.prepareView(b2.StoreLayers, b2.StoreView)
+	os.Rename(missing+".gone", missing) // present, but layerReady never ran
+	if err := s.ensureStoreView(b2); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(b2.StoreView); len(entries) != 5 {
+		t.Fatalf("%d store paths in the second view, want 5", len(entries))
+	}
+}

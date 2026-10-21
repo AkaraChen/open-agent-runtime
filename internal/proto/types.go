@@ -100,6 +100,10 @@ type ComposeResult struct {
 	Cached       bool          `json:"cached"`
 	Duration     time.Duration `json:"duration"`
 	Layers       []string      `json:"layers"`
+	// View and Flush are the parts of Duration spent finishing the store
+	// view and writing the cache back (warm precompose).
+	View  time.Duration `json:"view,omitempty"`
+	Flush time.Duration `json:"flush,omitempty"`
 }
 
 // Reload strategies.

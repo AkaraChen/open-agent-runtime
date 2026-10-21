@@ -106,6 +106,13 @@ func New(cfg Config) (*Server, error) {
 	for _, e := range entries {
 		os.RemoveAll(filepath.Join(s.layout.Tmp(), e.Name()))
 	}
+	// and from view builds an agent restart interrupted
+	for _, dir := range []string{"views", "skeletons"} {
+		tmps, _ := filepath.Glob(filepath.Join(cfg.Root, dir, "store.tmp-*"))
+		for _, t := range tmps {
+			os.RemoveAll(t)
+		}
+	}
 	return s, nil
 }
 
@@ -152,13 +159,16 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err != nil {
 			return nil, err
 		}
+		tView := time.Now()
 		if err := s.ensureStoreView(res.Bundle); err != nil {
 			return nil, err
 		}
+		tFlush := time.Now()
 		if a.Flush {
 			s.flushCache()
 		}
-		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers}, nil
+		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers,
+			View: tFlush.Sub(tView), Flush: time.Since(tFlush)}, nil
 	case proto.OpRun, proto.OpReload:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -245,6 +255,16 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 			}
 		}
 		return s.stats(), nil
+	case proto.OpViewPrepare:
+		var a proto.ComposeArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		if a.Lock == nil {
+			return nil, fmt.Errorf("missing lock")
+		}
+		s.prepareView(compose.StoreLayers(s.layout, a.Lock), s.layout.StoreView(compose.ClosureKey(a.Lock)))
+		return map[string]string{}, nil
 	case proto.OpShutdown:
 		if s.cfg.Shutdown == nil {
 			return nil, fmt.Errorf("shutdown is only supported inside the guest VM")
@@ -391,7 +411,13 @@ func (s *Server) warmPutInto(it proto.WarmItem, body io.Reader, size int64, res 
 	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(src, final)
+	if err := os.Rename(src, final); err != nil {
+		return err
+	}
+	if it.Kind == proto.KindStore {
+		s.layerReady(final)
+	}
+	return nil
 }
 
 func leafName(kind string) string {

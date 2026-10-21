@@ -128,6 +128,11 @@ type warmStats struct {
 	// Status and Precompose are the warm.status and compose round trips.
 	Status     time.Duration `json:"status"`
 	Precompose time.Duration `json:"precompose,omitempty"`
+	// Upload is the wall time of the uploads; View and Flush split the
+	// guest side of Precompose.
+	Upload time.Duration `json:"upload,omitempty"`
+	View   time.Duration `json:"view,omitempty"`
+	Flush  time.Duration `json:"flush,omitempty"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -150,7 +155,7 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 		var err error
 		if precompose {
 			t := time.Now()
-			err = s.precompose(ctx)
+			err = s.precompose(ctx, stats)
 			stats.Precompose = time.Since(t)
 		}
 		stats.Duration = time.Since(start)
@@ -163,11 +168,19 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	if verbose {
 		fmt.Fprintf(os.Stderr, "warming guest cache: %d of %d artifacts (%s)\n", len(st.Missing), len(items), human(total))
 	}
+	if precompose && os.Getenv("OAR_VIEW_PREPARE") != "0" {
+		// the agent links the store paths it already has into the view
+		// while the rest uploads (an older agent rejects the op: ignored;
+		// OAR_VIEW_PREPARE=0 skips it for comparisons)
+		var ok map[string]string
+		_ = s.client.Call(ctx, proto.OpViewPrepare, proto.ComposeArgs{Lock: s.lock}, &ok)
+	}
 	// biggest first keeps the pipeline busy
 	sort.Slice(st.Missing, func(i, j int) bool { return st.Missing[i].Size > st.Missing[j].Size })
 	var sent, files, guest atomic.Int64
 	var mu sync.Mutex
 	var lastPct int64
+	tUpload := time.Now()
 	eg, ectx := errgroup.WithContext(ctx)
 	eg.SetLimit(4)
 	for _, it := range st.Missing {
@@ -201,9 +214,10 @@ func (s *session) warmOpt(ctx context.Context, verbose, precompose bool) (*warmS
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
+	stats.Upload = time.Since(tUpload)
 	if precompose {
 		t := time.Now()
-		if err := s.precompose(ctx); err != nil {
+		if err := s.precompose(ctx, stats); err != nil {
 			return nil, err
 		}
 		stats.Precompose = time.Since(t)
@@ -244,11 +258,13 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 // precompose builds the bundle template and its /nix/store view in the
 // guest and writes the warmed data back to the guest's disk, so the first
 // start of a freshly warmed bundle is as fast as later ones.
-func (s *session) precompose(ctx context.Context) error {
+func (s *session) precompose(ctx context.Context, stats *warmStats) error {
 	var res proto.ComposeResult
 	// OAR_WARM_FLUSH=0 skips the end-of-warm flush (benchmark comparisons)
 	flush := os.Getenv("OAR_WARM_FLUSH") != "0"
-	return s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
+	err := s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
+	stats.View, stats.Flush = res.View, res.Flush
+	return err
 }
 
 func firstNonEmpty(a, b string) string {

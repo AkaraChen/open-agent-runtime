@@ -738,6 +738,9 @@ type warmOut struct {
 	GuestTime  float64 `json:"guestTime"`
 	Status     float64 `json:"status"`
 	Precompose float64 `json:"precompose"`
+	Upload     float64 `json:"upload"`
+	View       float64 `json:"view"`
+	Flush      float64 `json:"flush"`
 }
 
 func (b *bench) phaseWarm() error {
@@ -749,13 +752,18 @@ func (b *bench) phaseWarm() error {
 		return err
 	}
 	b.add(g, "cold", "冷预热完整组合", "s", true, wall.Seconds()).Note = fmt.Sprintf("%d 个产物，%.0f MiB，%d 个文件", w.Uploaded, float64(w.Bytes)/(1<<20), w.Files)
+	if w.Upload > 0 {
+		b.add(g, "cold.upload", "　其中：上传并解包（4 路并发）", "s", true, w.Upload/1e9)
+		b.add(g, "cold.view", "　其中：等待 store 视图完成", "ms", true, w.View/1e6)
+		b.add(g, "cold.flush", "　其中：写回缓存盘", "ms", true, w.Flush/1e6)
+	}
 	b.add(g, "cold.mbps", "冷预热吞吐", "MiB/s", false, float64(w.Bytes)/(1<<20)/wall.Seconds())
 	b.add(g, "cold.fps", "冷预热文件处理速率", "文件/s", false, float64(w.Files)/wall.Seconds())
 	var wb warmOut
 	wall, err = b.oarJSON(&wb, "--bundle", b.digests["b"], "warm")
 	if err == nil {
-		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms，CLI 总计 %.1f ms",
-			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.Duration/1e6)
+		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
+			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.View/1e6, wb.Flush/1e6, wb.Duration/1e6)
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if b.digests[name] == "" {

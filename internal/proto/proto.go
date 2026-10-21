@@ -43,6 +43,9 @@ const (
 	OpPrepare    = "prepare"
 	OpDial       = "dial"
 	OpIngress    = "ingress.list"
+	// OpViewPrepare starts building a closure's store view while a warm
+	// is still uploading (args: ComposeArgs; returns at once).
+	OpViewPrepare = "view.prepare"
 )
 
 // Request header.
