@@ -344,6 +344,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		if err == nil {
 			select {
 			case <-m.Done():
+				CloseDataDisk(cfg.Dir) // the guest synced and unmounted before powering off
 			case <-time.After(20 * time.Second):
 				m.Kill()
 			}
@@ -432,6 +433,57 @@ func EnsureDisk(p string, gib int) error {
 	}
 	defer f.Close()
 	return f.Truncate(int64(gib) << 30)
+}
+
+// The guest's data disk is a rebuildable cache, so the backends attach it
+// without durability: a guest flush does not reach the host's disk. After a
+// host crash or a killed VM the image can be inconsistent in ways no fsck
+// repairs, and nothing in it is worth repairing. A marker file next to the
+// image records that a VM may be writing to it. It is created (and made
+// durable) before the guest boots and removed once the guest has shut down
+// cleanly and the image has been synced; a marker found at the next boot
+// means the image is discarded and the guest formats a fresh one.
+const diskMarker = "data.img.open"
+
+// OpenDataDisk returns the path of the data disk in dir, creating it, and
+// starts the unclean-shutdown window described above.
+func OpenDataDisk(dir string, gib int) (string, error) {
+	disk := filepath.Join(dir, "data.img")
+	if fileExists(filepath.Join(dir, diskMarker)) {
+		os.Remove(disk)
+	}
+	if err := EnsureDisk(disk, gib); err != nil {
+		return "", err
+	}
+	f, err := os.Create(filepath.Join(dir, diskMarker))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return "", err
+	}
+	// the marker must be durable before the first write to the image
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return disk, nil
+}
+
+// CloseDataDisk ends the window after a clean guest shutdown. The image is
+// written to the host's disk first, so a later host crash cannot leave it
+// torn behind a missing marker.
+func CloseDataDisk(dir string) {
+	f, err := os.OpenFile(filepath.Join(dir, "data.img"), os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	err = f.Sync()
+	f.Close()
+	if err == nil {
+		os.Remove(filepath.Join(dir, diskMarker))
+	}
 }
 
 // consoleMarkers are guest init messages whose arrival on the host is

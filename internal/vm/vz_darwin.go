@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -69,14 +68,14 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	vmCfg.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{consoleCfg})
 
-	disk := filepath.Join(cfg.Dir, "data.img")
-	if err := EnsureDisk(disk, cfg.DiskGiB); err != nil {
+	disk, err := OpenDataDisk(cfg.Dir, cfg.DiskGiB)
+	if err != nil {
 		return nil, err
 	}
-	// The data disk is a rebuildable cache: guest flushes become fsync
-	// instead of F_FULLFSYNC (VZ's default "full" mode), which is an order of
-	// magnitude faster on macOS.
-	diskAtt, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(disk, false, vz.DiskImageCachingModeCached, vz.DiskImageSynchronizationModeFsync)
+	// The data disk is a rebuildable cache: guest flushes are not passed on
+	// (VZ's default "full" mode is F_FULLFSYNC, "fsync" still a disk write
+	// per flush).
+	diskAtt, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(disk, false, vz.DiskImageCachingModeCached, vz.DiskImageSynchronizationModeNone)
 	if err != nil {
 		return nil, fmt.Errorf("disk: %w", err)
 	}
