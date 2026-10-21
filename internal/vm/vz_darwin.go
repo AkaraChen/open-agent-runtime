@@ -6,10 +6,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"os"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/Code-Hex/vz/v3"
+	"github.com/Code-Hex/vz/v3/vmnet"
 	"golang.org/x/sys/unix"
 )
 
@@ -34,9 +38,10 @@ func (vzBackend) Available() error {
 }
 
 type vzMachine struct {
-	vm   *vz.VirtualMachine
-	done chan struct{}
-	once sync.Once
+	vm      *vz.VirtualMachine
+	network *vmnet.Network // kept alive with the VM (nil with VZ's NAT)
+	done    chan struct{}
+	once    sync.Once
 }
 
 func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
@@ -45,6 +50,13 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	console := "hvc0"
 	cmdline := "console=" + console + " panic=-1 quiet loglevel=3"
+	attachment, network, netSpec, err := vzNetwork()
+	if err != nil {
+		return nil, err
+	}
+	if netSpec != "" {
+		cmdline += " oar.net=" + netSpec
+	}
 	if cfg.GuestCmdline != "" {
 		cmdline += " " + cfg.GuestCmdline
 	}
@@ -85,11 +97,7 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	vmCfg.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{blk})
 
-	nat, err := vz.NewNATNetworkDeviceAttachment()
-	if err != nil {
-		return nil, err
-	}
-	netCfg, err := vz.NewVirtioNetworkDeviceConfiguration(nat)
+	netCfg, err := vz.NewVirtioNetworkDeviceConfiguration(attachment)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +128,7 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	if err := machine.Start(); err != nil {
 		return nil, fmt.Errorf("start VM: %w", err)
 	}
-	m := &vzMachine{vm: machine, done: make(chan struct{})}
+	m := &vzMachine{vm: machine, network: network, done: make(chan struct{})}
 	go func() {
 		for st := range machine.StateChangedNotify() {
 			if st == vz.VirtualMachineStateStopped || st == vz.VirtualMachineStateError {
@@ -130,6 +138,47 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		}
 	}()
 	return m, nil
+}
+
+// vzNetwork returns the guest's network attachment. On macOS 26 and later
+// it is a vmnet shared (NAT) network on a subnet that no host interface
+// uses, with the guest's static address for the kernel command line. VZ's
+// NAT attachment always takes vmnet's default 192.168.64.0/24, and on a
+// host that is itself on that subnet (a Mac VM, such as the GitHub macOS
+// runners) its bridge takes over the host's gateway and DNS; older macOS
+// versions keep it, with a warning in that case.
+func vzNetwork() (vz.NetworkDeviceAttachment, *vmnet.Network, string, error) {
+	used, err := hostPrefixes()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("host interfaces: %w", err)
+	}
+	subnet, err := freeGuestSubnet(used)
+	var cfg *vmnet.NetworkConfiguration
+	if err == nil {
+		cfg, err = vmnet.NewNetworkConfiguration(vmnet.SharedMode)
+	}
+	if err == nil {
+		err = cfg.SetIPv4Subnet(subnet)
+	}
+	var network *vmnet.Network
+	if err == nil {
+		network, err = vmnet.NewNetwork(cfg)
+	}
+	var att vz.NetworkDeviceAttachment
+	if err == nil {
+		att, err = vz.NewVmnetNetworkDeviceAttachment(network)
+	}
+	if err == nil {
+		return att, network, guestNetSpec(subnet), nil
+	}
+	nat, natErr := vz.NewNATNetworkDeviceAttachment()
+	if natErr != nil {
+		return nil, nil, "", natErr
+	}
+	if def := netip.MustParsePrefix("192.168.64.0/24"); slices.ContainsFunc(used, def.Overlaps) {
+		fmt.Fprintf(os.Stderr, "vz: warning: the host is on %s, the subnet VZ's NAT gives the guest: host networking may break while the VM runs (a vmnet network on another subnet needs macOS 26: %v)\n", def, err)
+	}
+	return nat, nil, "", nil
 }
 
 func (m *vzMachine) DialAgent(ctx context.Context) (net.Conn, error) {
