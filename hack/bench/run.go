@@ -377,6 +377,13 @@ type buildOut struct {
 	} `json:"stats"`
 }
 
+// buildSplit describes where a build's wall time went.
+func buildSplit(o *buildOut, wall time.Duration) string {
+	st := o.Stats
+	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、求值 %.0f、下载 %.0f、组件 %.0f），其余（CLI 进程、配置、锁文件）%.0f ms",
+		st.Total/1e6, st.Base/1e6, st.Eval/1e6, st.Fetch/1e6, st.Components/1e6, ms(wall)-st.Total/1e6)
+}
+
 func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
 	var out buildOut
 	d, err := b.oarJSON(&out, "-f", cfg, "build", "--platform", b.platform)
@@ -461,13 +468,14 @@ func (b *bench) phaseBuild() error {
 	b.add(g, "closure.size", "闭包大小（tar）", "MiB", true, float64(s.ClosureBytes)/(1<<20))
 
 	// no-op rebuild
-	_, wall, err = b.build("a", a)
+	on, wall, err := b.build("a", a)
 	if err == nil {
-		b.add(g, "noop", "无变化重建", "ms", true, ms(wall))
+		b.add(g, "noop", "无变化重建", "ms", true, ms(wall)).Note = buildSplit(on, wall)
 	}
 	// incremental: drop a component; three combos (they differ only in an
 	// env var) so one noisy sample does not decide
 	var removes []float64
+	var splits []string
 	var o2 *buildOut
 	for _, name := range []string{"nogit", "nogit-2", "nogit-3"} {
 		cfg := b.writeConfig(name, cfgOpts{drop: "nix:git", env: map[string]string{"VARIANT": name}})
@@ -479,10 +487,11 @@ func (b *bench) phaseBuild() error {
 			o2 = o
 		}
 		removes = append(removes, ms(wall))
+		splits = append(splits, buildSplit(o, wall))
 	}
 	if o2 != nil {
 		b.add(g, "incr.remove", "增量构建：删除一个组件（nix:git，3 个组合）", "ms", true, removes...).Note =
-			fmt.Sprintf("第一个：下载 %d 个 path，求值 %d 个属性", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr)
+			fmt.Sprintf("第一个：下载 %d 个 path，求值 %d 个属性；%s", o2.Stats.FetchedPaths, o2.Stats.EvaluatedAttr, strings.Join(splits, " | "))
 	}
 	// add a package that was never evaluated
 	hello := b.writeConfig("hello", cfgOpts{extra: []string{"nix:hello"}, env: map[string]string{"VARIANT": "hello"}})

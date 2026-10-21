@@ -158,6 +158,9 @@ func BenchmarkNew(b *testing.B) {
 		b.Skip("needs root")
 	}
 	dir := b.TempDir()
+	if d := os.Getenv("OAR_BENCH_ROOT"); d != "" {
+		dir = d // e.g. under a shared mount, like /var/lib on systemd hosts
+	}
 	for i := 0; i < b.N; i++ {
 		s, err := New(Config{Root: dir, Mode: "native", Runc: Runc{Root: dir + "/runc"}})
 		if err != nil {
