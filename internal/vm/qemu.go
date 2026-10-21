@@ -107,8 +107,8 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	disk := filepath.Join(cfg.Dir, "data.img")
-	if err := EnsureDisk(disk, cfg.DiskGiB); err != nil {
+	disk, err := OpenDataDisk(cfg.Dir, cfg.DiskGiB)
+	if err != nil {
 		return nil, err
 	}
 	accel := accelerator(arch)
@@ -190,7 +190,7 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		"-kernel", cfg.Kernel, "-initrd", cfg.Initrd,
 		"-append", cmdline,
 		"-serial", "file:" + cfg.ConsoleLog,
-		"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=writeback",
+		"-drive", "if=none,id=data,format=raw,file=" + disk + ",cache=unsafe",
 		"-device", "virtio-blk" + bus + ",drive=data",
 		"-netdev", netdev, "-device", netDevice,
 		"-device", "virtio-rng" + bus,
