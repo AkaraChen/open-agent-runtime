@@ -71,3 +71,24 @@ func zstdArtifact(p string) (string, error) {
 	}
 	return z, os.Rename(tmp.Name(), z)
 }
+
+// warmFlush reports whether a warm ends by writing the guest cache back:
+// OAR_WARM_FLUSH=1 or 0 forces it. VM guests flush: with hundreds of MB
+// still to write back, the guest's first runc create waited 377-409 ms
+// for ext4's journal commit and the next view build slowed 2-3x (kvm,
+// same-runner A/B; 43 ms after the flush). The native backend does not:
+// there the first start was unaffected while the flush of the host
+// filesystem made warms 4x slower.
+func warmFlush(g *globalOpts) bool {
+	switch os.Getenv("OAR_WARM_FLUSH") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	st, err := vm.ReadState(vmDir(g))
+	if err != nil {
+		return true
+	}
+	return st.Transport != "inprocess"
+}

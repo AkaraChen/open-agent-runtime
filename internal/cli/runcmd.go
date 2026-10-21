@@ -282,11 +282,7 @@ func (s *session) putWithRetry(ctx context.Context, it proto.WarmItem, p string,
 // ones.
 func (s *session) precompose(ctx context.Context, stats *warmStats) error {
 	var res proto.ComposeResult
-	// No flush by default: since runc no longer writes its pid file with
-	// O_SYNC, nothing on the start path waits for the warm's writeback
-	// (same-runner A/B: first start unchanged, cold warm native 12.5 ->
-	// 1.8 s, kvm 3.5 -> 2.4 s). OAR_WARM_FLUSH=1 writes it back anyway.
-	flush := os.Getenv("OAR_WARM_FLUSH") == "1"
+	flush := warmFlush(s.g)
 	err := s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
 	stats.View, stats.Flush = res.View, res.Flush
 	return err
