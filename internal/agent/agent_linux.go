@@ -127,11 +127,42 @@ func (s *Server) runcVersion() string {
 // Handle dispatches a request and logs failures to the agent's stderr
 // (the guest console).
 func (s *Server) Handle(ctx context.Context, req *proto.Request, body io.Reader, rs *proto.ResponseStream) (any, error) {
+	if !longRunning[req.Op] {
+		t0 := time.Now()
+		slow := time.AfterFunc(slowRequest, func() { reportSlow(req.Op, t0) })
+		defer func() {
+			if !slow.Stop() {
+				fmt.Fprintf(os.Stderr, "oar-agent: %s finished after %s\n", req.Op, time.Since(t0).Round(time.Millisecond))
+			}
+		}()
+	}
 	res, err := s.handle(ctx, req, body, rs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "oar-agent: %s failed: %v\n", req.Op, err)
 	}
 	return res, err
+}
+
+// longRunning are operations that legitimately last long (streams, long
+// polls, uploads); the others are reported when they exceed slowRequest.
+var longRunning = map[string]bool{
+	proto.OpLogs: true, proto.OpExec: true, proto.OpDial: true, proto.OpIngress: true, proto.OpWarmPut: true,
+}
+
+const slowRequest = 60 * time.Second
+
+var slowDump sync.Once
+
+// reportSlow logs an operation that is still running, with every
+// goroutine's stack the first time, so a hang shows where it waits (the
+// console log is kept when a benchmark phase fails).
+func reportSlow(op string, since time.Time) {
+	fmt.Fprintf(os.Stderr, "oar-agent: %s still running after %s\n", op, time.Since(since).Round(time.Second))
+	slowDump.Do(func() {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		fmt.Fprintf(os.Stderr, "oar-agent: goroutines:\n%s\n", buf[:n])
+	})
 }
 
 func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader, rs *proto.ResponseStream) (any, error) {
