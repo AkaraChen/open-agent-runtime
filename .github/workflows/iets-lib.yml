@@ -34,13 +34,14 @@ jobs:
         shell: bash
         run: |
           p=${{ matrix.platform }}
+          echo "ARTIFACT=libiets_ffi-${p%/*}_${p#*/}" >> "$GITHUB_ENV"
           dir=internal/nixeval/iets/lib/${p%/*}_${p#*/}
           mkdir -p out
           cp "$dir/libiets_ffi.a" "out/libiets_ffi-${p%/*}_${p#*/}.a"
           echo "$(cat "$dir/SHA256")  libiets_ffi-${p%/*}_${p#*/}.a" > "out/libiets_ffi-${p%/*}_${p#*/}.a.sha256"
       - uses: actions/upload-artifact@v7
         with:
-          name: libiets_ffi-${{ matrix.platform }}
+          name: ${{ env.ARTIFACT }}
           path: out/
           retention-days: 30
 
