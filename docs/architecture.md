@@ -68,7 +68,11 @@ The builder produces:
   every narinfo's ed25519 signature and NarHash verified. NARs are converted to tarballs in memory,
   never extracted on the host, so Linux store paths can be prepared on case-insensitive macOS
   filesystems. Each store path becomes its own tarball, which gives deduplication across bundles for
-  free.
+  free. The download favours wall time over CPU and connections: the graph is walked through
+  narinfos as they arrive, NARs start largest first over a deep HTTP/1.1 connection pool, and large
+  NARs are split into parallel Range requests. Each NAR is spooled to a temporary file and decoded
+  from the front while it downloads, with decoding limited to the number of CPUs, so memory does
+  not grow with the number of downloads (`internal/builder/download.go`, `spool.go`).
 - **Components.** Custom binaries, directory trees and files (from disk or inline in the config)
   are packed into deterministic tarballs: uid 0 and a fixed mtime, keyed by content hash.
 - **Metadata.** Dependency closure, entry point, PATH, environment, file conflicts and ABI
