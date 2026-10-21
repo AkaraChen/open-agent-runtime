@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/compose"
 )
@@ -158,6 +159,56 @@ func BenchmarkNew(b *testing.B) {
 		b.StopTimer()
 		s.StopAll(context.Background())
 		b.StartTimer()
+	}
+}
+
+// A slow view build does not block starts whose view is complete, nor the
+// build of another view; callers of the same view share one build.
+func TestStoreViewConcurrent(t *testing.T) {
+	s := rootServer(t)
+	fast := fakeBundle(t, s, "fast", 5)
+	if err := s.ensureStoreView(fast); err != nil {
+		t.Fatal(err)
+	}
+	// slow: holding the view build's lock stalls ensureStoreView on it
+	slow := fakeBundle(t, s, "slow", 5)
+	s.prepareView(slow.StoreLayers, slow.StoreView)
+	vb := s.groups.builds[slow.StoreView]
+	vb.mu.Lock()
+	errs := make(chan error, 2)
+	for range 2 { // two callers for the same view: one build
+		go func() { errs <- s.ensureStoreView(slow) }()
+	}
+	time.Sleep(100 * time.Millisecond)
+	other := fakeBundle(t, s, "other", 5)
+	for _, b := range []*compose.Bundle{fast, other} {
+		done := make(chan error, 1)
+		go func() { done <- s.ensureStoreView(b) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				vb.mu.Unlock()
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			vb.mu.Unlock()
+			t.Fatal("ensureStoreView blocked by another view's build")
+		}
+	}
+	select {
+	case err := <-errs:
+		vb.mu.Unlock()
+		t.Fatalf("slow view finished early: %v", err)
+	default:
+	}
+	vb.mu.Unlock()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, _ := os.ReadDir(slow.StoreView); len(entries) != 5 {
+		t.Fatalf("%d store paths in the slow view, want 5", len(entries))
 	}
 }
 

@@ -27,9 +27,17 @@ import (
 // file, once per closure, off the start path (at warm time).
 
 type storeGroups struct {
-	mu      sync.Mutex
-	mounted map[string]bool       // views known to be complete
-	builds  map[string]*viewBuild // views being built ahead of a precompose
+	mu       sync.Mutex             // protects the maps only: building and waiting happen outside it
+	mounted  map[string]bool        // views known to be complete
+	builds   map[string]*viewBuild  // views being built ahead of a precompose
+	inflight map[string]*viewFlight // views being completed by ensureStoreView
+}
+
+// A viewFlight is one ensureStoreView in progress for a view: concurrent
+// callers for the same view wait on it, callers for other views do not.
+type viewFlight struct {
+	done chan struct{}
+	err  error
 }
 
 // ensureStoreView builds the bundle's /nix/store view if it is missing.
@@ -39,17 +47,45 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 	}
 	view := b.StoreView
 	s.groups.mu.Lock()
-	defer s.groups.mu.Unlock()
 	if s.groups.mounted == nil {
 		s.groups.mounted = map[string]bool{}
 	}
 	if s.groups.mounted[view] {
+		s.groups.mu.Unlock()
 		return nil
 	}
-	if vb := s.groups.builds[view]; vb != nil {
-		// started by view.prepare during the warm: let it finish (with
-		// groups.mu held, like a build done here; link jobs do not take it)
-		delete(s.groups.builds, view)
+	if f := s.groups.inflight[view]; f != nil {
+		s.groups.mu.Unlock()
+		<-f.done
+		return f.err
+	}
+	f := &viewFlight{done: make(chan struct{})}
+	if s.groups.inflight == nil {
+		s.groups.inflight = map[string]*viewFlight{}
+	}
+	s.groups.inflight[view] = f
+	vb := s.groups.builds[view]
+	delete(s.groups.builds, view)
+	s.groups.mu.Unlock()
+
+	f.err = s.completeStoreView(b, vb)
+
+	s.groups.mu.Lock()
+	if f.err == nil {
+		s.groups.mounted[view] = true
+	}
+	delete(s.groups.inflight, view)
+	s.groups.mu.Unlock()
+	close(f.done)
+	return f.err
+}
+
+// completeStoreView makes the view complete, finishing vb (a build started
+// by view.prepare, or nil) or building it here. It takes no server lock.
+func (s *Server) completeStoreView(b *compose.Bundle, vb *viewBuild) error {
+	view := b.StoreView
+	if vb != nil {
+		// started by view.prepare during the warm: let it finish
 		for _, layer := range b.StoreLayers {
 			vb.link(layer) // any layer it has not seen arrive
 		}
@@ -72,7 +108,6 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 	// is partial or left by an older layout (a mount point)
 	done := view + ".done"
 	if _, err := os.Stat(done); err == nil {
-		s.groups.mounted[view] = true
 		return nil
 	}
 	unix.Unmount(view, unix.MNT_DETACH)
@@ -121,7 +156,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 	return s.publishView(tmp, view, done)
 }
 
-// publishView moves a completed view into place (caller holds groups.mu).
+// publishView moves a completed view into place.
 func (s *Server) publishView(tmp, view, done string) error {
 	os.Chmod(tmp, 0o755)
 	if err := os.Rename(tmp, view); err != nil {
@@ -130,7 +165,6 @@ func (s *Server) publishView(tmp, view, done string) error {
 	if err := os.WriteFile(done, nil, 0o644); err != nil {
 		return err
 	}
-	s.groups.mounted[view] = true
 	return nil
 }
 
@@ -375,7 +409,7 @@ func (s *Server) prepareView(layers []string, view string) {
 		return
 	}
 	s.groups.mu.Lock()
-	if s.groups.mounted[view] || s.groups.builds[view] != nil {
+	if s.groups.mounted[view] || s.groups.builds[view] != nil || s.groups.inflight[view] != nil {
 		s.groups.mu.Unlock()
 		return
 	}

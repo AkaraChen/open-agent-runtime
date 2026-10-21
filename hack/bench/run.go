@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1192,6 +1193,48 @@ func (b *bench) phaseDensity() error {
 	st, _ := b.stats()
 	b.add(g, "bundles", fmt.Sprintf("guest 已缓存 %d+ 个组合后的启动延迟", vs), "ms", true, many...).Note =
 		fmt.Sprintf("guest 挂载 %d 个，已挂载视图 %d 个", st.Mounts, st.StoreViews)
+
+	// starting a cached bundle while another closure's store view is being
+	// built: the start must not wait for that build
+	if _, _, err := b.build("newpkg", b.writeConfig("newpkg", cfgOpts{extra: []string{"nix:ripgrep"}, env: map[string]string{"VARIANT": "newpkg"}})); err != nil {
+		return err
+	}
+	var warmWall time.Duration
+	warmDone := make(chan error, 1)
+	go func() {
+		d, err := b.oarJSON(nil, "--bundle", b.digests["newpkg"], "warm")
+		warmWall = d
+		warmDone <- err
+	}()
+	var during []float64
+	var warmErr error
+	finished := false
+	for !finished && len(during) < 200 {
+		select {
+		case warmErr = <-warmDone:
+			finished = true
+			continue
+		default:
+		}
+		_, d, err := b.run("vb", b.digests["idle"])
+		if err != nil {
+			return err
+		}
+		during = append(during, ms(d))
+		b.rm("vb")
+	}
+	if !finished {
+		warmErr = <-warmDone
+	}
+	if warmErr != nil {
+		return warmErr
+	}
+	if len(during) > 0 {
+		worst := slices.Max(during)
+		b.add(g, "view.contend", "新闭包预热（建视图）期间启动已缓存的组合", "ms", true, during...).Note =
+			fmt.Sprintf("预热 %.0f ms 内启动 %d 次，最慢 %.0f ms", ms(warmWall), len(during), worst)
+		b.add(g, "view.contend.max", "　其中最慢的一次", "ms", true, worst)
+	}
 	return nil
 }
 
