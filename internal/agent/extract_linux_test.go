@@ -136,3 +136,187 @@ func syncDir(dir string) {
 		f.Close()
 	}
 }
+
+func TestExtractModesAndTimes(t *testing.T) {
+	dest := t.TempDir()
+	mt := time.Unix(1_000_000, 0)
+	hs := []*tar.Header{
+		{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o555},
+		{Name: "d/sub/", Typeflag: tar.TypeDir, Mode: 0o700},
+		{Name: "d/sub/f", Typeflag: tar.TypeReg, Mode: 0o4755},
+		{Name: "d/link", Typeflag: tar.TypeSymlink, Linkname: "sub/f"},
+		{Name: "d/fifo", Typeflag: tar.TypeFifo, Mode: 0o664},
+		{Name: "sticky/", Typeflag: tar.TypeDir, Mode: 0o1777},
+		{Name: "implicit/x/f", Typeflag: tar.TypeReg, Mode: 0o644},
+	}
+	var out bytes.Buffer
+	tw := tar.NewWriter(&out)
+	for _, h := range hs {
+		h.ModTime = time.Unix(1, 0)
+		if h.Typeflag == tar.TypeDir || h.Typeflag == tar.TypeSymlink {
+			h.ModTime = mt
+		}
+		if h.Typeflag == tar.TypeReg {
+			h.Size = 1
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			tw.Write([]byte("x"))
+		}
+	}
+	tw.Close()
+	if _, err := extractTar(&out, dest); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(dest, "d"), 0o755) })
+	for p, want := range map[string]os.FileMode{
+		"d":        0o555,
+		"d/sub":    0o700,
+		"d/sub/f":  0o755 | os.ModeSetuid,
+		"d/fifo":   0o664 | os.ModeNamedPipe,
+		"sticky":   0o777 | os.ModeSticky,
+		"implicit": 0o755 &^ umask,
+	} {
+		st, err := os.Lstat(filepath.Join(dest, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Mode() &^ os.ModeDir; got != want {
+			t.Errorf("%s: mode %v, want %v", p, got, want)
+		}
+	}
+	for _, p := range []string{"d", "d/sub", "d/link", "sticky"} {
+		st, err := os.Lstat(filepath.Join(dest, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.ModTime().Equal(mt) {
+			t.Errorf("%s: mtime %v, want %v (directories are stamped after their children)", p, st.ModTime(), mt)
+		}
+	}
+	if l, _ := os.Readlink(filepath.Join(dest, "d/link")); l != "sub/f" {
+		t.Errorf("symlink target %q", l)
+	}
+}
+
+func TestExtractOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	dest := t.TempDir()
+	buf := mkTar(t, []*tar.Header{
+		{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o755, Uid: 1234, Gid: 4321},
+		{Name: "d/f", Typeflag: tar.TypeReg, Mode: 0o644, Uid: 1234, Gid: 4321},
+		{Name: "d/l", Typeflag: tar.TypeSymlink, Linkname: "f", Uid: 1234, Gid: 4321},
+		{Name: "r/", Typeflag: tar.TypeDir, Mode: 0o555},
+	}, nil)
+	if _, err := extractTar(buf, dest); err != nil {
+		t.Fatal(err)
+	}
+	for p, ids := range map[string][2]uint32{"d": {1234, 4321}, "d/f": {1234, 4321}, "d/l": {1234, 4321}, "r": {0, 0}} {
+		var st unix.Stat_t
+		if err := unix.Lstat(filepath.Join(dest, p), &st); err != nil {
+			t.Fatal(err)
+		}
+		if st.Uid != ids[0] || st.Gid != ids[1] {
+			t.Errorf("%s: owner %d:%d, want %d:%d", p, st.Uid, st.Gid, ids[0], ids[1])
+		}
+	}
+}
+
+func TestExtractDuplicates(t *testing.T) {
+	dest := t.TempDir()
+	buf := mkTar(t, []*tar.Header{
+		{Name: "a", Typeflag: tar.TypeReg, Mode: 0o644},
+		{Name: "a", Typeflag: tar.TypeReg, Mode: 0o600},
+		{Name: "b/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "b/x", Typeflag: tar.TypeReg, Mode: 0o644},
+		{Name: "b", Typeflag: tar.TypeSymlink, Linkname: "a"}, // replaces the directory
+		{Name: "c/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "c/", Typeflag: tar.TypeDir, Mode: 0o750},
+	}, map[string]string{"b/x": "x"})
+	if _, err := extractTar(buf, dest); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(filepath.Join(dest, "a")); st.Mode().Perm() != 0o600 {
+		t.Errorf("a mode %v", st.Mode())
+	}
+	if l, err := os.Readlink(filepath.Join(dest, "b")); err != nil || l != "a" {
+		t.Errorf("b: %q %v", l, err)
+	}
+	if st, _ := os.Stat(filepath.Join(dest, "c")); st.Mode().Perm() != 0o750 {
+		t.Errorf("c mode %v", st.Mode())
+	}
+}
+
+// A directory replaced by a symlink must not stay writable through the
+// cached descriptors.
+func TestExtractReplacedDirIsNotTraversed(t *testing.T) {
+	dest := t.TempDir()
+	outside := t.TempDir()
+	buf := mkTar(t, []*tar.Header{
+		{Name: "a/b/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "a/b/f", Typeflag: tar.TypeReg, Mode: 0o644},
+		{Name: "a", Typeflag: tar.TypeSymlink, Linkname: outside},
+		{Name: "a/b/g", Typeflag: tar.TypeReg, Mode: 0o644},
+	}, map[string]string{"a/b/f": "1", "a/b/g": "2"})
+	if _, err := extractTar(buf, dest); err == nil {
+		t.Fatal("expected traversal error")
+	}
+	if es, _ := os.ReadDir(outside); len(es) != 0 {
+		t.Fatalf("wrote outside destination: %v", es)
+	}
+}
+
+func TestExtractHardlinks(t *testing.T) {
+	for name, hs := range map[string][]*tar.Header{
+		"to directory":    {{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o755}, {Name: "l", Typeflag: tar.TypeLink, Linkname: "d"}},
+		"missing target":  {{Name: "l", Typeflag: tar.TypeLink, Linkname: "nope"}},
+		"through symlink": {{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "/"}, {Name: "l", Typeflag: tar.TypeLink, Linkname: "s/etc/passwd"}},
+	} {
+		if _, err := extractTar(mkTar(t, hs, nil), t.TempDir()); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	// '..' is clamped inside dest, like entry names
+	dest := t.TempDir()
+	buf := mkTar(t, []*tar.Header{
+		{Name: "f", Typeflag: tar.TypeReg, Mode: 0o644},
+		{Name: "l1", Typeflag: tar.TypeLink, Linkname: "../../f"},
+		{Name: "l2", Typeflag: tar.TypeLink, Linkname: "l1"}, // link to a link
+	}, map[string]string{"f": "data"})
+	if _, err := extractTar(buf, dest); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.Stat(filepath.Join(dest, "f"))
+	for _, p := range []string{"l1", "l2"} {
+		if l, _ := os.Stat(filepath.Join(dest, p)); !os.SameFile(f, l) {
+			t.Errorf("%s is not a link to f", p)
+		}
+	}
+	// a target that existed before the extraction
+	if err := os.WriteFile(filepath.Join(dest, "pre"), []byte("p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractTar(mkTar(t, []*tar.Header{{Name: "l3", Typeflag: tar.TypeLink, Linkname: "pre"}}, nil), dest); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// More directories than descriptors are kept open.
+func TestExtractManyDirs(t *testing.T) {
+	dest := t.TempDir()
+	var hs []*tar.Header
+	for i := 0; i < 3*maxDirFds; i++ {
+		hs = append(hs, &tar.Header{Name: fmt.Sprintf("d%d/", i), Typeflag: tar.TypeDir, Mode: 0o755})
+		hs = append(hs, &tar.Header{Name: fmt.Sprintf("d%d/e/f", i), Typeflag: tar.TypeReg, Mode: 0o644})
+	}
+	if _, err := extractTar(mkTar(t, hs, nil), dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, fmt.Sprintf("d%d/e/f", 3*maxDirFds-1))); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -203,3 +203,52 @@ func TestPrepareView(t *testing.T) {
 		t.Fatalf("%d store paths in the second view, want 5", len(entries))
 	}
 }
+
+func TestLinkTree(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	os.MkdirAll(filepath.Join(src, "bin", "deep"), 0o755)
+	os.MkdirAll(filepath.Join(src, "ro", "inner"), 0o755)
+	os.WriteFile(filepath.Join(src, "bin", "tool"), []byte("t"), 0o555)
+	os.WriteFile(filepath.Join(src, "ro", "inner", "g"), []byte("g"), 0o444)
+	os.Symlink("../bin/tool", filepath.Join(src, "ro", "link"))
+	long := strings.Repeat("l", 700)
+	os.Symlink(long, filepath.Join(src, "longlink"))
+	os.Chmod(filepath.Join(src, "bin"), 0o755) // whatever the umask
+	os.Chmod(filepath.Join(src, "bin", "deep"), 0o755)
+	os.Chmod(filepath.Join(src, "ro", "inner"), 0o555)
+	os.Chmod(filepath.Join(src, "ro"), 0o555)
+	os.Chmod(src, 0o555)
+	t.Cleanup(func() {
+		for _, root := range []string{src, dst} {
+			os.Chmod(root, 0o755)
+			os.Chmod(filepath.Join(root, "ro"), 0o755)
+			os.Chmod(filepath.Join(root, "ro", "inner"), 0o755)
+		}
+	})
+	if err := linkTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]os.FileMode{
+		"": 0o555, "bin": 0o755, "bin/deep": 0o755, "ro": 0o555, "ro/inner": 0o555,
+	} {
+		st, err := os.Stat(filepath.Join(dst, p))
+		if err != nil || st.Mode().Perm() != want {
+			t.Errorf("%q: %v %v, want %v", p, st, err, want)
+		}
+	}
+	for _, p := range []string{"bin/tool", "ro/inner/g"} {
+		a, _ := os.Stat(filepath.Join(src, p))
+		b, err := os.Stat(filepath.Join(dst, p))
+		if err != nil || !os.SameFile(a, b) {
+			t.Errorf("%s is not a hard link (%v)", p, err)
+		}
+	}
+	if l, _ := os.Readlink(filepath.Join(dst, "ro", "link")); l != "../bin/tool" {
+		t.Errorf("link %q", l)
+	}
+	if l, _ := os.Readlink(filepath.Join(dst, "longlink")); l != long {
+		t.Errorf("long link has %d bytes", len(l))
+	}
+}

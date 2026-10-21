@@ -97,12 +97,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 			defer wg.Done()
 			for layer := range work {
 				name := filepath.Base(layer)
-				var dirs []dirMode
-				err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(tmp, name), &dirs)
-				// read-only store directories get their modes after their contents
-				for i := len(dirs) - 1; i >= 0; i-- {
-					os.Chmod(dirs[i].path, dirs[i].mode)
-				}
+				err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(tmp, name))
 				if err != nil {
 					errs <- fmt.Errorf("store view %s: %w", name, err)
 				}
@@ -134,41 +129,111 @@ func (s *Server) publishView(tmp, view, done string) error {
 	return nil
 }
 
-type dirMode struct {
-	path string
-	mode os.FileMode
+// linkTree mirrors src at dst: directories are created, files hard-linked
+// and symlinks copied. It works relative to directory descriptors (the
+// kernel resolves one path component per call). As root each directory is
+// created with its final mode, since root can still add entries to a
+// read-only one; otherwise directories are made owner-writable and get
+// their modes once their contents are done.
+func linkTree(src, dst string) error {
+	sfd, err := unix.Open(src, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(sfd, &st); err != nil {
+		unix.Close(sfd)
+		return err
+	}
+	perm := os.FileMode(st.Mode).Perm()
+	mk := perm
+	if !isRoot {
+		mk |= 0o700
+	}
+	if err := os.Mkdir(dst, mk); err != nil {
+		unix.Close(sfd)
+		return err
+	}
+	dfd, err := unix.Open(dst, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		unix.Close(sfd)
+		return err
+	}
+	return linkDir(sfd, dfd, perm)
 }
 
-// linkTree mirrors src at dst: directories are created, files hard-linked
-// and symlinks copied.
-func linkTree(src, dst string, dirs *[]dirMode) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, p)
-		target := filepath.Join(dst, rel)
-		switch {
-		case d.IsDir():
-			info, err := d.Info()
+// linkDir mirrors the directory sfd into dfd (created with perm, plus
+// owner access unless root), closes both, and then sets dfd's mode to perm
+// if creation did not already give it.
+func linkDir(sfd, dfd int, perm os.FileMode) error {
+	defer unix.Close(dfd)
+	d := os.NewFile(uintptr(sfd), "")
+	defer d.Close()
+	ents, err := d.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	for _, ent := range ents {
+		name := ent.Name()
+		switch t := ent.Type(); {
+		case t.IsDir():
+			csfd, err := unix.Openat(sfd, name, dirFlags, 0)
 			if err != nil {
 				return err
 			}
-			if err := os.Mkdir(target, 0o755); err != nil {
+			var st unix.Stat_t
+			if err := unix.Fstat(csfd, &st); err != nil {
+				unix.Close(csfd)
 				return err
 			}
-			*dirs = append(*dirs, dirMode{target, info.Mode().Perm()})
-		case d.Type()&fs.ModeSymlink != 0:
-			l, err := os.Readlink(p)
+			cperm := os.FileMode(st.Mode).Perm()
+			mk := cperm
+			if !isRoot {
+				mk |= 0o700
+			}
+			if err := unix.Mkdirat(dfd, name, uint32(mk)); err != nil {
+				unix.Close(csfd)
+				return err
+			}
+			cdfd, err := unix.Openat(dfd, name, dirFlags, 0)
 			if err != nil {
+				unix.Close(csfd)
 				return err
 			}
-			return os.Symlink(l, target)
+			if err := linkDir(csfd, cdfd, cperm); err != nil {
+				return err
+			}
+		case t&fs.ModeSymlink != 0:
+			buf := make([]byte, 256)
+			for {
+				n, err := unix.Readlinkat(sfd, name, buf)
+				if err != nil {
+					return err
+				}
+				if n < len(buf) {
+					buf = buf[:n]
+					break
+				}
+				buf = make([]byte, 2*len(buf))
+			}
+			if err := unix.Symlinkat(string(buf), dfd, name); err != nil {
+				return err
+			}
 		default:
-			return os.Link(p, target)
+			if err := unix.Linkat(sfd, name, dfd, name, 0); err != nil {
+				return err
+			}
 		}
+	}
+	made := perm &^ umask // what mkdir gave a directory of this mode
+	if !isRoot {
+		made = (perm | 0o700) &^ umask
+	}
+	if made == perm {
 		return nil
-	})
+	}
+	return unix.Fchmod(dfd, uint32(perm))
 }
 
 // unmountStoreGroups removes mounts left below the bundle cache by older
@@ -442,11 +507,7 @@ func (vb *viewBuild) link(layer string) {
 	go func() {
 		viewLinkers <- struct{}{}
 		name := filepath.Base(layer)
-		var dirs []dirMode
-		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
-		for i := len(dirs) - 1; i >= 0; i-- {
-			os.Chmod(dirs[i].path, dirs[i].mode)
-		}
+		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name))
 		<-viewLinkers
 		vb.mu.Lock()
 		if err != nil && vb.err == nil {
