@@ -22,12 +22,15 @@ import (
 //     49 -> 36 s); it made VZ and native slower.
 //   - Compress: zstd over a QEMU port forward (14-34% faster); VZ's guest
 //     decompresses slower than its channel transfers (~25% slower).
-type warmTuning struct{ Flush, Writeback, Compress bool }
+//   - InPlace: the native agent reads the artifact tar from the host path
+//     itself (no copy through the channel) and copies file data out of it
+//     inside the kernel.
+type warmTuning struct{ Flush, Writeback, Compress, InPlace bool }
 
 func tuningFor(transport string) warmTuning {
 	switch transport {
 	case "inprocess": // native
-		return warmTuning{}
+		return warmTuning{InPlace: true}
 	case "vsock": // QEMU/KVM
 		return warmTuning{Flush: true, Writeback: true}
 	case "tcp": // QEMU through a port forward (macOS)

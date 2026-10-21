@@ -92,6 +92,10 @@ type WarmPutArgs struct {
 	// then the tar's size, which the checksum and size checks apply to.
 	Encoding string `json:"encoding,omitempty"`
 	RawSize  int64  `json:"rawSize,omitempty"`
+	// Path names the tarball on the agent's own filesystem instead of
+	// sending it as the body. Only the native backend (agent and CLI on
+	// one host) accepts it.
+	Path string `json:"path,omitempty"`
 }
 
 // ComposeArgs composes a bundle from a platform lock.
