@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1018,7 +1019,8 @@ func (b *bench) phaseRuntime() error {
 		}
 	}
 	if r["net.connect"] >= 0 {
-		b.add(g, "net.connect", "容器 → 外网 TCP 建连（1.1.1.1:443，中位数）", "ms", true, r["net.connect"])
+		b.add(g, "net.connect", "容器 → 外网 TCP 建连（1.1.1.1:443，中位数）", "ms", true, r["net.connect"]).Note =
+			"经公网，主要反映 runner 的网络；oar 自身的网络路径见 net.local"
 	} else {
 		b.fail(g, "net.connect", "容器 → 外网 TCP 建连", "无法连接（guest 无网络）")
 	}
@@ -1027,6 +1029,7 @@ func (b *bench) phaseRuntime() error {
 	} else {
 		b.fail(g, "net.dns", "容器内 DNS 解析", "解析失败")
 	}
+	b.netLocal(g)
 
 	// page cache sharing: read the same store path from two containers
 	// icu4c is in the closure but not touched by the workload above
@@ -1660,4 +1663,64 @@ func (b *bench) saveVMLogs(out, phase string) {
 			os.WriteFile(fmt.Sprintf("%s.%s.%s", base, phase, name), data, 0o644)
 		}
 	}
+}
+
+// netLocalScript connects from the container to a TCP listener on the host
+// (argv: host or "gateway", port) and prints the connect latencies.
+const netLocalScript = `
+import json, socket, struct, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+if host == "gateway":
+    for line in open("/proc/net/route").readlines()[1:]:
+        f = line.split()
+        if f[1] == "00000000":
+            host = socket.inet_ntoa(struct.pack("<L", int(f[2], 16)))
+            break
+lat = []
+for _ in range(10):
+    s = time.time()
+    socket.create_connection((host, port), timeout=3).close()
+    lat.append((time.time() - s) * 1000)
+print(json.dumps({"host": host, "lat": lat}))
+`
+
+// netLocal measures TCP connect latency from a container to the host:
+// the container's own network path (virtual NIC, NAT), independent of the
+// runner's internet connection. Native containers share the host's network
+// namespace and use loopback; guests reach the host as their gateway.
+func (b *bench) netLocal(g string) {
+	const name = "容器 → 宿主机 TCP 建连（虚拟网卡 + NAT，10 次）"
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		b.fail(g, "net.local", name, err.Error())
+		return
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	host := "gateway"
+	if b.backend == "native" {
+		host = "127.0.0.1"
+	}
+	out, err := b.exec("work", "python3", "-c", netLocalScript, host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port))
+	if err != nil {
+		b.fail(g, "net.local", name, err.Error())
+		return
+	}
+	var r struct {
+		Host string    `json:"host"`
+		Lat  []float64 `json:"lat"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &r); err != nil || len(r.Lat) == 0 {
+		b.fail(g, "net.local", name, fmt.Sprintf("output: %v: %s", err, out))
+		return
+	}
+	b.add(g, "net.local", name, "ms", true, r.Lat...).Note = "目标 " + r.Host
 }

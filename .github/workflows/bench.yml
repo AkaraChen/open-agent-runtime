@@ -9,6 +9,9 @@ on:
       ab_store_view:
         description: also run the benchmark on the same runner with OAR_STORE_VIEW set to this (A/B)
         default: ""
+      ab_env:
+        description: also run the benchmark on the same runner with these environment settings, e.g. OAR_QEMU_MACHINE=q35 (A/B)
+        default: ""
       base:
         description: >-
           A/B mode: also benchmark this commit (full sha, tag or branch) on
@@ -138,6 +141,12 @@ jobs:
           go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
             -profile ${{ github.event.inputs.profile || 'quick' }} \
             -out results-${{ matrix.label }}-${{ github.event.inputs.ab_store_view }}.json -- --cpus 2 --memory 4096
+      - name: "benchmark (B, ${{ github.event.inputs.ab_env }})"
+        if: github.event.inputs.ab_env != ''
+        run: |
+          env ${{ github.event.inputs.ab_env }} go run ./hack/bench run -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
+            -profile ${{ github.event.inputs.profile || 'quick' }} \
+            -out results-${{ matrix.label }}-b.json -- --cpus 2 --memory 4096
       - uses: actions/upload-artifact@v4
         if: always()
         with:
