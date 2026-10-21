@@ -11,8 +11,10 @@ import (
 )
 
 // warmCompression reports whether warm uploads are zstd-compressed:
-// OAR_WARM_COMPRESS=1 or 0 forces it, otherwise slow control channels
-// (VZ's vsock, a QEMU port forward) use it and fast ones do not.
+// OAR_WARM_COMPRESS=1 or 0 forces it; by default only a QEMU port forward
+// uses it. Same-runner A/B, both orders: QEMU warms 14-34% faster with it;
+// VZ about 25% slower (its guest decompresses slower than the channel
+// transfers, on the CI hosts measured), so VZ does not compress.
 func warmCompression(g *globalOpts) bool {
 	switch os.Getenv("OAR_WARM_COMPRESS") {
 	case "1":
@@ -24,7 +26,7 @@ func warmCompression(g *globalOpts) bool {
 	if err != nil {
 		return false
 	}
-	return st.Transport == "tcp" || st.Transport == "vz-vsock"
+	return st.Transport == "tcp"
 }
 
 // zstdArtifact returns the zstd-compressed copy of the artifact at p,
