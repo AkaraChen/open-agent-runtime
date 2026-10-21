@@ -434,43 +434,35 @@ func (s *Server) layerReady(layer string) {
 // link links layer into the view in the background if it is still
 // pending and present.
 func (vb *viewBuild) link(layer string) {
-	if vb.claim(layer) {
-		go vb.run(layer)
-	}
-}
-
-// claim takes layer off the pending set if it is there and present.
-func (vb *viewBuild) claim(layer string) bool {
 	vb.mu.Lock()
-	defer vb.mu.Unlock()
 	if !vb.pending[layer] {
-		return false
+		vb.mu.Unlock()
+		return
 	}
 	if _, err := os.Lstat(layer); err != nil {
-		return false // not uploaded yet
+		vb.mu.Unlock()
+		return // not uploaded yet
 	}
 	delete(vb.pending, layer)
 	vb.inflight++
-	return true
-}
-
-// run links a claimed layer.
-func (vb *viewBuild) run(layer string) {
-	viewLinkers <- struct{}{}
-	name := filepath.Base(layer)
-	var dirs []dirMode
-	err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
-	for i := len(dirs) - 1; i >= 0; i-- {
-		os.Chmod(dirs[i].path, dirs[i].mode)
-	}
-	<-viewLinkers
-	vb.mu.Lock()
-	if err != nil && vb.err == nil {
-		vb.err = fmt.Errorf("store view %s: %w", name, err)
-	}
-	vb.inflight--
-	vb.finish()
 	vb.mu.Unlock()
+	go func() {
+		viewLinkers <- struct{}{}
+		name := filepath.Base(layer)
+		var dirs []dirMode
+		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
+		for i := len(dirs) - 1; i >= 0; i-- {
+			os.Chmod(dirs[i].path, dirs[i].mode)
+		}
+		<-viewLinkers
+		vb.mu.Lock()
+		if err != nil && vb.err == nil {
+			vb.err = fmt.Errorf("store view %s: %w", name, err)
+		}
+		vb.inflight--
+		vb.finish()
+		vb.mu.Unlock()
+	}()
 }
 
 // finish closes done once nothing is pending or in flight (vb.mu held).
