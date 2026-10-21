@@ -4,6 +4,7 @@ package agent
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -88,17 +89,31 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 		if hdr.Mode&01000 != 0 {
 			mode |= os.ModeSticky
 		}
-		if hdr.Typeflag != tar.TypeDir {
-			if st, err := os.Lstat(full); err == nil {
-				if st.IsDir() {
-					if err := os.RemoveAll(full); err != nil {
-						return err
-					}
-				} else if err := os.Remove(full); err != nil {
+		// entries normally land on fresh paths: creation fails with EEXIST
+		// only for duplicates, which then replace what is there (no lstat
+		// per entry)
+		replace := func() error {
+			st, err := os.Lstat(full)
+			if err != nil {
+				return err
+			}
+			if st.IsDir() {
+				err = os.RemoveAll(full)
+			} else {
+				err = os.Remove(full)
+			}
+			delete(safeDirs, rel)
+			return err
+		}
+		retry := func(create func() error) error {
+			err := create()
+			if errors.Is(err, os.ErrExist) {
+				if err := replace(); err != nil {
 					return err
 				}
-				delete(safeDirs, rel)
+				err = create()
 			}
+			return err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -108,19 +123,27 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 			dirs = append(dirs, dirMeta{full, mode, hdr})
 			continue
 		case tar.TypeReg, tar.TypeRegA:
-			f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|unix.O_NOFOLLOW, 0o600)
-			if err != nil {
+			var f *os.File
+			if err := retry(func() (err error) {
+				f, err = os.OpenFile(full, os.O_CREATE|os.O_EXCL|os.O_WRONLY|unix.O_NOFOLLOW, mode.Perm())
+				return err
+			}); err != nil {
 				return err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
 				return err
 			}
-			if err := f.Close(); err != nil {
+			err := fileMeta(f, hdr, mode)
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
 				return err
 			}
+			continue // metadata applied on the open file
 		case tar.TypeSymlink:
-			if err := os.Symlink(hdr.Linkname, full); err != nil {
+			if err := retry(func() error { return os.Symlink(hdr.Linkname, full) }); err != nil {
 				return err
 			}
 		case tar.TypeLink:
@@ -129,7 +152,7 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 			if st, err := os.Lstat(tfull); err != nil || st.IsDir() {
 				return fmt.Errorf("bad hardlink %s -> %s", rel, hdr.Linkname)
 			}
-			if err := os.Link(tfull, full); err != nil {
+			if err := retry(func() error { return os.Link(tfull, full) }); err != nil {
 				return err
 			}
 			continue // shares metadata with the target
@@ -141,7 +164,7 @@ func extractTarCount(r io.Reader, dest string, count *int) error {
 				m = unix.S_IFBLK
 			}
 			dev := unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor))
-			if err := unix.Mknod(full, m|uint32(mode.Perm()), int(dev)); err != nil {
+			if err := retry(func() error { return unix.Mknod(full, m|uint32(mode.Perm()), int(dev)) }); err != nil {
 				return err
 			}
 		default:
@@ -167,6 +190,42 @@ func parentOf(rel string) string {
 		return ""
 	}
 	return d
+}
+
+// umask is the process umask, read once (it is process-wide).
+var umask = func() os.FileMode {
+	m := unix.Umask(0)
+	unix.Umask(m)
+	return os.FileMode(m)
+}()
+
+// fileMeta applies a regular file's metadata through its open descriptor:
+// no path lookups, and no chown or chmod when creation already got them
+// right (the common case: root-owned files whose mode the umask keeps).
+func fileMeta(f *os.File, hdr *tar.Header, mode os.FileMode) error {
+	fd := int(f.Fd())
+	chowned := false
+	if hdr.Uid != os.Geteuid() || hdr.Gid != os.Getegid() {
+		if err := unix.Fchown(fd, hdr.Uid, hdr.Gid); err != nil && !errors.Is(err, unix.EPERM) {
+			return err
+		}
+		chowned = true // also clears setuid/setgid bits
+	}
+	for k, v := range hdr.PAXRecords {
+		if name, ok := strings.CutPrefix(k, "SCHILY.xattr."); ok {
+			_ = unix.Fsetxattr(fd, name, []byte(v), 0) // best effort, as applyMeta
+		}
+	}
+	if chowned || mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || mode.Perm()&umask != 0 {
+		if err := f.Chmod(mode); err != nil {
+			return err
+		}
+	}
+	atime := hdr.ModTime
+	if !hdr.AccessTime.IsZero() {
+		atime = hdr.AccessTime
+	}
+	return unix.Futimes(fd, []unix.Timeval{unix.NsecToTimeval(atime.UnixNano()), unix.NsecToTimeval(hdr.ModTime.UnixNano())})
 }
 
 func applyMeta(full string, hdr *tar.Header, mode os.FileMode, symlink bool) error {

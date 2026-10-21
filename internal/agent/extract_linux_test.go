@@ -5,10 +5,13 @@ package agent
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func mkTar(t *testing.T, hdrs []*tar.Header, bodies map[string]string) *bytes.Buffer {
@@ -78,5 +81,58 @@ func TestExtractDotDot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "escape")); err != nil {
 		t.Fatal("'..' should be clamped inside dest")
+	}
+}
+
+// BenchmarkExtract extracts every tar in $OAR_BENCH_TARS (for example a
+// closure's store artifacts) into a fresh directory per iteration.
+func BenchmarkExtract(b *testing.B) {
+	dir := os.Getenv("OAR_BENCH_TARS")
+	if dir == "" {
+		b.Skip("set OAR_BENCH_TARS to a directory of tar files")
+	}
+	tars, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
+	var data [][]byte
+	for _, p := range tars {
+		d, err := os.ReadFile(p)
+		if err != nil {
+			b.Fatal(err)
+		}
+		data = append(data, d)
+	}
+	root := b.TempDir()
+	if r := os.Getenv("OAR_BENCH_ROOT"); r != "" {
+		root = r
+	}
+	files := 0
+	i := 0
+	for b.Loop() {
+		dest := filepath.Join(root, fmt.Sprintf("x%d", i))
+		i++
+		if err := os.MkdirAll(dest, 0o755); err != nil {
+			b.Fatal(err)
+		}
+		files = 0
+		for _, d := range data {
+			n, err := extractTar(bytes.NewReader(d), dest)
+			if err != nil {
+				b.Fatal(err)
+			}
+			files += n
+		}
+		// untimed: clean up and write back, so iterations do not run into
+		// the kernel's dirty-page throttling
+		b.StopTimer()
+		os.RemoveAll(dest)
+		syncDir(root)
+		b.StartTimer()
+	}
+	b.ReportMetric(float64(files), "files/op")
+}
+
+func syncDir(dir string) {
+	if f, err := os.Open(dir); err == nil {
+		unix.Syncfs(int(f.Fd()))
+		f.Close()
 	}
 }
