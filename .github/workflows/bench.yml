@@ -18,6 +18,11 @@ on:
       backends:
         description: A/B mode, comma separated backends to run
         default: native,kvm,vz,qemu
+      vmnet_subnet:
+        description: >-
+          macOS: move the vmnet shared (NAT) subnet to this gateway address
+          before benchmarking (e.g. 10.97.0.1); empty keeps the default
+        default: ""
 
 env:
   GO_VERSION: "1.26"
@@ -197,6 +202,16 @@ jobs:
           workspaces: head/rust/iets-ffi
       - if: steps.sel.outputs.run == 'true'
         run: (cd head && hack/build.sh) && (cd base && hack/build.sh)
+      # the macOS runners are VMs on 192.168.64.0/24, vmnet's default NAT
+      # subnet: a guest started with VZ NAT can take over the runner's
+      # gateway and DNS
+      - if: steps.sel.outputs.run == 'true' && runner.os == 'macOS' && github.event.inputs.vmnet_subnet != ''
+        name: move the vmnet NAT subnet
+        run: |
+          plist=/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist
+          sudo defaults write $plist Shared_Net_Address -string ${{ github.event.inputs.vmnet_subnet }}
+          sudo defaults write $plist Shared_Net_Mask -string 255.255.255.0
+          sudo defaults read $plist
       - if: steps.sel.outputs.run == 'true'
         name: benchmark (interleaved)
         working-directory: head

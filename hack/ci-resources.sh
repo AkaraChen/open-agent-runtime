@@ -24,6 +24,20 @@ snapshot() {
 		free -m
 	fi
 	uptime
+	echo "--- network"
+	if [ "$(uname)" = Darwin ]; then
+		ifconfig | awk '/^[a-z]/ {i=$1} /inet / {print i, $2, $4}'
+		netstat -rn -f inet | awk 'NR>3 && ($1=="default" || $1 ~ /^192\.168/)' | head -8
+	else
+		ip -4 -br addr
+		ip -4 route | head -8
+	fi
+	t=$(date +%s)
+	if host -W 3 github.com >/dev/null 2>&1 || nslookup -timeout=3 github.com >/dev/null 2>&1; then
+		echo "dns github.com: ok ($(($(date +%s) - t)) s)"
+	else
+		echo "dns github.com: FAILED ($(($(date +%s) - t)) s)"
+	fi
 	echo "--- largest bench dirs"
 	du -sh "${TMPDIR:-/tmp}"/oar-bench-home-* "$GITHUB_WORKSPACE"/*/examples/*/.bench-artifacts-* 2>/dev/null | sort -h | tail -8
 	echo "--- oar / VM processes"
