@@ -87,11 +87,12 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
+	moved := s.stealViews(tmp, b.StoreLayers, view)
 	// store paths are linked in parallel: the cost is one syscall per file
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
 	var wg sync.WaitGroup
-	for range min(runtime.NumCPU()*2, len(b.StoreLayers)) {
+	for range min(runtime.NumCPU()*2, max(len(b.StoreLayers)-len(moved), 1)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -110,7 +111,9 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		}()
 	}
 	for _, layer := range b.StoreLayers {
-		work <- layer
+		if !moved[filepath.Base(layer)] {
+			work <- layer
+		}
 	}
 	close(work)
 	wg.Wait()
@@ -392,10 +395,14 @@ func (s *Server) prepareView(layers []string, view string) {
 		s.groups.mu.Unlock()
 		return
 	}
+	moved := s.stealViews(tmp, layers, view)
 	vb := &viewBuild{tmp: tmp, done: make(chan struct{}), pending: map[string]bool{}}
 	for _, l := range layers {
-		vb.pending[l] = true
+		if !moved[filepath.Base(l)] {
+			vb.pending[l] = true
+		}
 	}
+	vb.finish() // nothing to link when the donor had it all
 	if s.groups.builds == nil {
 		s.groups.builds = map[string]*viewBuild{}
 	}
@@ -427,35 +434,43 @@ func (s *Server) layerReady(layer string) {
 // link links layer into the view in the background if it is still
 // pending and present.
 func (vb *viewBuild) link(layer string) {
+	if vb.claim(layer) {
+		go vb.run(layer)
+	}
+}
+
+// claim takes layer off the pending set if it is there and present.
+func (vb *viewBuild) claim(layer string) bool {
 	vb.mu.Lock()
+	defer vb.mu.Unlock()
 	if !vb.pending[layer] {
-		vb.mu.Unlock()
-		return
+		return false
 	}
 	if _, err := os.Lstat(layer); err != nil {
-		vb.mu.Unlock()
-		return // not uploaded yet
+		return false // not uploaded yet
 	}
 	delete(vb.pending, layer)
 	vb.inflight++
+	return true
+}
+
+// run links a claimed layer.
+func (vb *viewBuild) run(layer string) {
+	viewLinkers <- struct{}{}
+	name := filepath.Base(layer)
+	var dirs []dirMode
+	err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
+	for i := len(dirs) - 1; i >= 0; i-- {
+		os.Chmod(dirs[i].path, dirs[i].mode)
+	}
+	<-viewLinkers
+	vb.mu.Lock()
+	if err != nil && vb.err == nil {
+		vb.err = fmt.Errorf("store view %s: %w", name, err)
+	}
+	vb.inflight--
+	vb.finish()
 	vb.mu.Unlock()
-	go func() {
-		viewLinkers <- struct{}{}
-		name := filepath.Base(layer)
-		var dirs []dirMode
-		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name), &dirs)
-		for i := len(dirs) - 1; i >= 0; i-- {
-			os.Chmod(dirs[i].path, dirs[i].mode)
-		}
-		<-viewLinkers
-		vb.mu.Lock()
-		if err != nil && vb.err == nil {
-			vb.err = fmt.Errorf("store view %s: %w", name, err)
-		}
-		vb.inflight--
-		vb.finish()
-		vb.mu.Unlock()
-	}()
 }
 
 // finish closes done once nothing is pending or in flight (vb.mu held).
