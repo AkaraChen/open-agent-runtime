@@ -32,6 +32,9 @@ func TestAlive(t *testing.T) {
 	}
 	s.Close()
 	time.Sleep(10 * time.Millisecond) // the FIN arrives
+	if _, ok := peekClosed(c); !ok {
+		t.Skip("no non-blocking peek on this platform: connections are assumed open")
+	}
 	if alive(c) {
 		t.Fatal("closed connection reported alive")
 	}
