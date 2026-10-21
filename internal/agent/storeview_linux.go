@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -472,4 +473,45 @@ func (vb *viewBuild) finish() {
 		vb.closed = true
 		close(vb.done)
 	}
+}
+
+// Background writeback during a warm: while uploads keep arriving, the
+// cache filesystem is synced in a loop, so the disk writes the extracted
+// data while later artifacts transfer and extract, and the final flush
+// only has the tail left. It stops once no upload arrived for a while.
+var (
+	writebackMu     sync.Mutex
+	writebackActive bool
+	writebackLast   time.Time
+)
+
+const writebackIdle = 500 * time.Millisecond
+
+func (s *Server) kickWriteback() {
+	writebackMu.Lock()
+	defer writebackMu.Unlock()
+	writebackLast = time.Now()
+	if writebackActive {
+		return
+	}
+	writebackActive = true
+	go func() {
+		f, err := os.Open(s.cfg.Root)
+		if err == nil {
+			defer f.Close()
+		}
+		for {
+			if err == nil {
+				unix.Syncfs(int(f.Fd()))
+			}
+			writebackMu.Lock()
+			if time.Since(writebackLast) > writebackIdle {
+				writebackActive = false
+				writebackMu.Unlock()
+				return
+			}
+			writebackMu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
 }

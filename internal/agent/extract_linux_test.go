@@ -85,8 +85,8 @@ func TestExtractDotDot(t *testing.T) {
 }
 
 // BenchmarkExtract extracts every tar in $OAR_BENCH_TARS (for example a
-// closure's store artifacts) into a fresh directory per iteration, with
-// and without starting writeback during the extraction.
+// closure's store artifacts) into a fresh directory per iteration and
+// writes it back.
 func BenchmarkExtract(b *testing.B) {
 	dir := os.Getenv("OAR_BENCH_TARS")
 	if dir == "" {
@@ -105,33 +105,29 @@ func BenchmarkExtract(b *testing.B) {
 	if r := os.Getenv("OAR_BENCH_ROOT"); r != "" {
 		root = r
 	}
-	for _, wb := range []bool{false, true} {
-		b.Run(fmt.Sprintf("writeback=%v", wb), func(b *testing.B) {
-			files, i := 0, 0
-			for b.Loop() {
-				dest := filepath.Join(root, fmt.Sprintf("x%v%d", wb, i))
-				i++
-				if err := os.MkdirAll(dest, 0o755); err != nil {
-					b.Fatal(err)
-				}
-				files = 0
-				for _, d := range data {
-					n, err := extractTarOpt(bytes.NewReader(d), dest, wb)
-					if err != nil {
-						b.Fatal(err)
-					}
-					files += n
-				}
-				// the time to write the rest back, then untimed cleanup
-				syncDir(root)
-				b.StopTimer()
-				os.RemoveAll(dest)
-				syncDir(root)
-				b.StartTimer()
+	files, i := 0, 0
+	for b.Loop() {
+		dest := filepath.Join(root, fmt.Sprintf("x%d", i))
+		i++
+		if err := os.MkdirAll(dest, 0o755); err != nil {
+			b.Fatal(err)
+		}
+		files = 0
+		for _, d := range data {
+			n, err := extractTar(bytes.NewReader(d), dest)
+			if err != nil {
+				b.Fatal(err)
 			}
-			b.ReportMetric(float64(files), "files/op")
-		})
+			files += n
+		}
+		// the time to write it back, then untimed cleanup
+		syncDir(root)
+		b.StopTimer()
+		os.RemoveAll(dest)
+		syncDir(root)
+		b.StartTimer()
 	}
+	b.ReportMetric(float64(files), "files/op")
 }
 
 func syncDir(dir string) {

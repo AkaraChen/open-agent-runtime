@@ -414,7 +414,10 @@ func (s *Server) warmPutInto(it proto.WarmItem, writeback bool, body io.Reader, 
 			return err
 		}
 	}
-	files, err := extractTarOpt(&cr, extractRoot, writeback)
+	if writeback {
+		s.kickWriteback()
+	}
+	files, err := extractTar(&cr, extractRoot)
 	if err != nil {
 		return fmt.Errorf("extract %s %s: %w", it.Kind, it.Key, err)
 	}

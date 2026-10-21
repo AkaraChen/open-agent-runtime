@@ -85,8 +85,8 @@ type WarmStatusResult struct {
 // WarmPutArgs precedes a tarball body.
 type WarmPutArgs struct {
 	Item WarmItem `json:"item"`
-	// Writeback starts writing extracted file data back while the warm
-	// continues (instead of leaving it all to a final flush).
+	// Writeback keeps syncing the guest cache in the background while the
+	// warm continues (instead of leaving all data to a final flush).
 	Writeback bool `json:"writeback,omitempty"`
 	// Encoding of the body: "" (the tar itself) or "zstd"; RawSize is
 	// then the tar's size, which the checksum and size checks apply to.

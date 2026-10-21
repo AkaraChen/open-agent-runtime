@@ -20,24 +20,12 @@ import (
 // ownership, permissions, xattrs, device nodes and timestamps, and refuses to
 // write through symlinks or outside dest.
 func extractTar(r io.Reader, dest string) (int, error) {
-	return extractTarOpt(r, dest, false)
-}
-
-// writebackMin is the smallest file whose writeback extractTarOpt starts
-// at once: smaller ones would turn into many tiny writes.
-const writebackMin = 64 << 10
-
-// extractTarOpt is extractTar; with writeback it starts writing each
-// larger file's data back as soon as it is extracted (asynchronously:
-// sync_file_range without waiting), so disk writes overlap the rest of
-// the warm instead of piling up for a final flush.
-func extractTarOpt(r io.Reader, dest string, writeback bool) (int, error) {
 	n := 0
-	err := extractTarCount(r, dest, &n, writeback)
+	err := extractTarCount(r, dest, &n)
 	return n, err
 }
 
-func extractTarCount(r io.Reader, dest string, count *int, writeback bool) error {
+func extractTarCount(r io.Reader, dest string, count *int) error {
 	tr := tar.NewReader(r)
 	type dirMeta struct {
 		path string
@@ -142,15 +130,11 @@ func extractTarCount(r io.Reader, dest string, count *int, writeback bool) error
 			}); err != nil {
 				return err
 			}
-			written, err := io.Copy(f, tr)
-			if err != nil {
+			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
 				return err
 			}
-			if writeback && written >= writebackMin {
-				unix.SyncFileRange(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
-			}
-			err = fileMeta(f, hdr, mode)
+			err := fileMeta(f, hdr, mode)
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}
