@@ -14,6 +14,7 @@
 | 7 | [warm 刷盘与就绪通知](07-warm-flush/README.md) | warm 结束前刷盘（首次启动 784 → 40 ms）、microvm 仅限 KVM、qemu 静态网络与就绪通知、store 视图同机 A/B（`ab-store-view/`） |
 | 8 | [端口转发](08-port-forwarding/README.md) | qemu 由 QEMU 自己转发、vz 直连 guest 地址（P1-3）；native 也在 warm 结束前刷盘 |
 | 9 | [剩余路线图评估](09-evaluations/README.md) | Cloud Hypervisor、只读 EROFS 镜像实测后不采用（你确认），内存回收实测无效；路线图完成情况汇总 |
+| 10 | [vz 连接中断](10-vz-connection/README.md) | 宿主机 socket 代理重试并记录连接失败（vz 偶发 EOF 的根因）、连接池存活检查、失败时保存 VM 日志 |
 
 复现方法：
 
