@@ -113,6 +113,9 @@ func (p *connPool) close() {
 // connection while it sat in the pool (it would otherwise fail the request
 // it is used for).
 func alive(c net.Conn) bool {
+	if c.LocalAddr().Network() == "pipe" {
+		return true // in-process agent (native backend): cannot go stale
+	}
 	if closed, ok := peekClosed(c); ok {
 		return !closed
 	}
