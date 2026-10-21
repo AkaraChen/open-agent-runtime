@@ -246,15 +246,15 @@ func mountData() {
 			logInit("mkfs.ext4 failed: %v: %s", err, out)
 		}
 	}
-	if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
+	if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, dataMountOpts); err != nil {
 		// The disk only holds a rebuildable cache: repair it, and if that
 		// fails start over with a fresh filesystem.
 		logInit("mount %s: %v; running e2fsck", dev, err)
 		exec.Command("e2fsck", "-p", "-f", dev).Run()
-		if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
+		if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, dataMountOpts); err != nil {
 			logInit("still unmountable (%v); reformatting the cache disk", err)
 			mkfsData(dev).Run()
-			if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, ""); err != nil {
+			if err := unix.Mount(dev, GuestRoot, "ext4", unix.MS_NOATIME, dataMountOpts); err != nil {
 				logInit("mount %s: %v; using tmpfs", dev, err)
 				unix.Mount("tmpfs", GuestRoot, "tmpfs", 0, "mode=0755")
 				return
@@ -263,6 +263,12 @@ func mountData() {
 	}
 	logInit("data disk %s mounted at %s", dev, GuestRoot)
 }
+
+// dataMountOpts: the host discards the cache disk after an unclean shutdown
+// (see vm.OpenDataDisk), so the filesystem does not need its data written
+// before the metadata that points to it (data=ordered makes every journal
+// commit wait for all pending data) nor write barriers.
+const dataMountOpts = "data=writeback,nobarrier"
 
 // mkfsData formats the cache disk. Metadata is written lazily, the device
 // is not discarded (a sparse image has nothing to discard, and discarding
