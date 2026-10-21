@@ -751,6 +751,8 @@ type warmOut struct {
 	Compressed bool    `json:"compressed"`
 	View       float64 `json:"view"`
 	Flush      float64 `json:"flush"`
+
+	DirtyBeforeFlush int64 `json:"dirtyBeforeFlush"`
 }
 
 func (b *bench) phaseWarm() error {
@@ -770,6 +772,7 @@ func (b *bench) phaseWarm() error {
 		b.add(g, "cold.upload", "　其中：上传并解包（4 路并发）", "s", true, w.Upload/1e9)
 		b.add(g, "cold.view", "　其中：等待 store 视图完成", "ms", true, w.View/1e6)
 		b.add(g, "cold.flush", "　其中：写回缓存盘", "ms", true, w.Flush/1e6)
+		b.add(g, "cold.dirty", "　其中：最后一个产物上传完时待写回的数据（Dirty + Writeback）", "MiB", true, float64(w.DirtyBeforeFlush)/(1<<20))
 	}
 	b.add(g, "cold.mbps", "冷预热吞吐", "MiB/s", false, float64(w.Bytes)/(1<<20)/wall.Seconds())
 	b.add(g, "cold.fps", "冷预热文件处理速率", "文件/s", false, float64(w.Files)/wall.Seconds())
