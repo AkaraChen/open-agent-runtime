@@ -21,7 +21,7 @@ var aLongTimeAgo = time.Unix(1000, 0)
 func newTestBuilder(t *testing.T, sources map[string]*spec.Source) (*Builder, string) {
 	dir := t.TempDir()
 	cfg := &spec.Config{Dir: dir, Sources: sources}
-	return &Builder{ctx: context.Background(), cfg: cfg, opts: Options{Artifacts: filepath.Join(dir, "artifacts"), Log: io.Discard}}, dir
+	return &Builder{ctx: context.Background(), cfg: cfg, opts: Options{Artifacts: filepath.Join(dir, "artifacts"), Log: io.Discard}, shared: &shared{}}, dir
 }
 
 func TestImportDirAndFileDeterministic(t *testing.T) {
