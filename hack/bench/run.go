@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -551,6 +552,8 @@ func (b *bench) phaseBuild() error {
 		"b-plain": {extra: []string{"nix:jq"}, env: map[string]string{"VARIANT": "b", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "0"}, ready: "my-agent: serving on"},
 		"slow-a":  {env: map[string]string{"VARIANT": "slow-a", "MY_AGENT_INIT_DELAY": "3s", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"},
 		"slow-b":  {env: map[string]string{"VARIANT": "slow-b", "MY_AGENT_INIT_DELAY": "3s", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"},
+		"stop-a":  {env: map[string]string{"VARIANT": "stop-a", "MY_AGENT_SHUTDOWN_DELAY": "1s", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"},
+		"stop-b":  {env: map[string]string{"VARIANT": "stop-b", "MY_AGENT_SHUTDOWN_DELAY": "1s", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"},
 		"broken":  {env: map[string]string{"VARIANT": "broken", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "0"}, ready: "never printed", readyTO: "2s"},
 		"idle":    {env: map[string]string{"VARIANT": "idle"}},
 		"ing-a":   {env: map[string]string{"VARIANT": "ing-a"}, ingress: true},
@@ -779,7 +782,7 @@ func (b *bench) phaseWarm() error {
 		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
 			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.View/1e6, wb.Flush/1e6, wb.Duration/1e6)
 	}
-	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
+	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "stop-a", "stop-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if b.digests[name] == "" {
 			continue // not built (-no-ingress)
 		}
@@ -815,6 +818,7 @@ type runOut struct {
 		SnapshotNote  string `json:"snapshotNote"`
 	} `json:"result"`
 	Total float64 `json:"total"`
+	Warm  warmOut `json:"warm"`
 }
 
 func (b *bench) run(name, bundle string) (*runOut, time.Duration, error) {
@@ -933,6 +937,48 @@ func (b *bench) phaseStart() error {
 		cmp = append(cmp, ms(d))
 	}
 	b.add(g, "compose.cli", "warm compose（CLI 端到端，验收标准 <1s）", "ms", true, cmp...)
+	return b.directStart()
+}
+
+// directStart measures "command to ready" for a user who runs or reloads
+// a closure the guest has never seen, without oar warm first: the CLI
+// uploads what is missing, then the agent builds the view and starts.
+func (b *bench) directStart() error {
+	const g = "4-start"
+	note := func(r *runOut) string {
+		t, w := r.Result.Timings, r.Warm
+		return fmt.Sprintf("CLI 上传 %d 个产物 %.1f MiB（上传 %.0f ms，视图 %.1f ms，写回 %.0f ms）；guest：compose %.1f ms（视图 %.1f ms，cached=%v），create %.0f ms，guest 合计 %.0f ms",
+			w.Uploaded, float64(w.Bytes)/(1<<20), w.Upload/1e6, w.View/1e6, w.Flush/1e6,
+			t.Compose/1e6, t.StoreView/1e6, r.Result.Cached, t.Create/1e6, t.Total/1e6)
+	}
+	// (i) run a bundle whose extra package is not in the guest cache
+	if _, _, err := b.build("direct-run", b.writeConfig("direct-run", cfgOpts{extra: []string{"nix:ruby"}, env: map[string]string{"VARIANT": "direct-run"}})); err != nil {
+		return err
+	}
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		return err
+	}
+	r, wall, err := b.run("direct", b.digests["direct-run"])
+	if err != nil {
+		return err
+	}
+	b.add(g, "direct.run", "直接 run 一个产物不在 guest 缓存的组合（命令到就绪，CLI 墙钟）", "ms", true, ms(wall)).Note = note(r)
+	// (ii) reload to a bundle that adds one new package
+	if _, _, err := b.build("direct-reload", b.writeConfig("direct-reload", cfgOpts{extra: []string{"nix:ripgrep"}, env: map[string]string{"VARIANT": "direct-reload"}})); err != nil {
+		b.rm("direct")
+		return err
+	}
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		b.rm("direct")
+		return err
+	}
+	var rr runOut
+	wall, err = b.oarJSON(&rr, "--bundle", b.digests["direct-reload"], "reload", "--name", "direct")
+	b.rm("direct")
+	if err != nil {
+		return err
+	}
+	b.add(g, "direct.reload", "直接 reload 到多一个新包的组合（命令到就绪，CLI 墙钟）", "ms", true, ms(wall)).Note = note(&rr)
 	return nil
 }
 
@@ -1192,6 +1238,48 @@ func (b *bench) phaseDensity() error {
 	st, _ := b.stats()
 	b.add(g, "bundles", fmt.Sprintf("guest 已缓存 %d+ 个组合后的启动延迟", vs), "ms", true, many...).Note =
 		fmt.Sprintf("guest 挂载 %d 个，已挂载视图 %d 个", st.Mounts, st.StoreViews)
+
+	// starting a cached bundle while another closure's store view is being
+	// built: the start must not wait for that build
+	if _, _, err := b.build("newpkg", b.writeConfig("newpkg", cfgOpts{extra: []string{"nix:ripgrep"}, env: map[string]string{"VARIANT": "newpkg"}})); err != nil {
+		return err
+	}
+	var warmWall time.Duration
+	warmDone := make(chan error, 1)
+	go func() {
+		d, err := b.oarJSON(nil, "--bundle", b.digests["newpkg"], "warm")
+		warmWall = d
+		warmDone <- err
+	}()
+	var during []float64
+	var warmErr error
+	finished := false
+	for !finished && len(during) < 200 {
+		select {
+		case warmErr = <-warmDone:
+			finished = true
+			continue
+		default:
+		}
+		_, d, err := b.run("vb", b.digests["idle"])
+		if err != nil {
+			return err
+		}
+		during = append(during, ms(d))
+		b.rm("vb")
+	}
+	if !finished {
+		warmErr = <-warmDone
+	}
+	if warmErr != nil {
+		return warmErr
+	}
+	if len(during) > 0 {
+		worst := slices.Max(during)
+		b.add(g, "view.contend", "新闭包预热（建视图）期间启动已缓存的组合", "ms", true, during...).Note =
+			fmt.Sprintf("预热 %.0f ms 内启动 %d 次，最慢 %.0f ms", ms(warmWall), len(during), worst)
+		b.add(g, "view.contend.max", "　其中最慢的一次", "ms", true, worst)
+	}
 	return nil
 }
 
@@ -1217,7 +1305,7 @@ func (b *bench) probeSummaryFor(name string) (map[string]float64, error) {
 	return nil, fmt.Errorf("probe printed no summary")
 }
 
-func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down []float64, err error) {
+func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down, stop []float64, err error) {
 	if _, _, err = b.run("svc", b.digests[a]); err != nil {
 		return
 	}
@@ -1245,6 +1333,7 @@ func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall,
 		wall = append(wall, ms(d))
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		down = append(down, r.Result.Timings.Downtime/1e6)
+		stop = append(stop, r.Result.Timings.StopOld/1e6)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1265,7 +1354,7 @@ func (b *bench) phaseSwitch() error {
 		{"replace", "a-plain", "b-plain", "replace", "replace", false},
 		{"overlap", "a", "b", "overlap + 预创建（prepare）", "prepared", true},
 	} {
-		wall, guest, down, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
+		wall, guest, down, stop, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
 		if err != nil {
 			b.rm("svc")
 			b.rm("probe")
@@ -1278,6 +1367,7 @@ func (b *bench) phaseSwitch() error {
 		}
 		b.add(g, sc.key+".wall", sc.label+"：切换耗时（CLI 墙钟）", "ms", true, wall...)
 		b.add(g, sc.key+".guest", sc.label+"：切换耗时（guest 内）", "ms", true, guest...)
+		b.add(g, sc.key+".stopold", sc.label+"：等待旧实例退出（StopOld，guest 内）", "ms", true, stop...)
 		if sc.strategy == "replace" {
 			b.add(g, sc.key+".down", sc.label+"：服务端停机窗口", "ms", true, down...)
 		}
@@ -1332,6 +1422,33 @@ func (b *bench) phaseSwitch() error {
 	b.add(g, "slow", "慢启动应用（初始化 3 秒）的切换耗时", "ms", true, slow...).Note = "受应用初始化时间限制；快照（P1）的目标场景"
 	b.rm("svc")
 
+	// slow-stopping application: the old instance needs 1 s to exit after
+	// SIGTERM, so the reload includes waiting for it
+	if _, _, err := b.run("svc", b.digests["stop-a"]); err != nil {
+		return err
+	}
+	var stWall, stGuest, stStop []float64
+	for i := 0; i < 5; i++ {
+		target := "stop-b"
+		if i%2 == 1 {
+			target = "stop-a"
+		}
+		var r runOut
+		d, err := b.oarJSON(&r, "--bundle", b.digests[target], "reload", "--name", "svc")
+		if err != nil {
+			return err
+		}
+		stWall = append(stWall, ms(d))
+		stGuest = append(stGuest, r.Result.Timings.Total/1e6)
+		stStop = append(stStop, r.Result.Timings.StopOld/1e6)
+		time.Sleep(300 * time.Millisecond)
+	}
+	b.add(g, "slowstop.wall", "慢退出应用（SIGTERM 后 1 秒才退出）：切换耗时（CLI 墙钟）", "ms", true, stWall...)
+	b.add(g, "slowstop.guest", "慢退出应用：切换耗时（guest 内）", "ms", true, stGuest...)
+	b.add(g, "slowstop.stopold", "慢退出应用：等待旧实例退出（StopOld，guest 内）", "ms", true, stStop...).Note =
+		"reload 等旧实例退出后才返回，这部分就是等待旧实例退出的时间"
+	b.rm("svc")
+
 	// stability: many consecutive switches, then check for leaks
 	m2 := 30
 	if !b.quick {
@@ -1379,7 +1496,7 @@ func (b *bench) ingressScenarios(n int) error {
 		return err
 	}
 	time.Sleep(time.Second)
-	var wall, guest, drainT []float64
+	var wall, guest, drainT, stopT []float64
 	for i := 0; i < n; i++ {
 		target := "ing-b"
 		if i%2 == 1 {
@@ -1393,6 +1510,7 @@ func (b *bench) ingressScenarios(n int) error {
 		wall = append(wall, ms(d))
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		drainT = append(drainT, r.Result.Timings.Drain/1e6)
+		stopT = append(stopT, r.Result.Timings.StopOld/1e6)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1403,6 +1521,7 @@ func (b *bench) ingressScenarios(n int) error {
 	b.add(g, "ingress.wall", "入口代理切换：切换耗时（CLI 墙钟）", "ms", true, wall...)
 	b.add(g, "ingress.guest", "入口代理切换：切换耗时（guest 内）", "ms", true, guest...)
 	b.add(g, "ingress.drain", "入口代理切换：旧实例排空在途连接", "ms", true, drainT...)
+	b.add(g, "ingress.stopold", "入口代理切换：等待旧实例退出（StopOld，guest 内）", "ms", true, stopT...)
 	total := sum["ok"] + sum["failed"]
 	b.add(g, "ingress.failed", fmt.Sprintf("入口代理切换：客户端失败请求（%d 次切换，无需 SO_REUSEPORT）", n), "个", true, sum["failed"]).Note =
 		fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
@@ -1416,7 +1535,7 @@ func (b *bench) ingressScenarios(n int) error {
 	if _, _, err := b.run("svc", b.digests["slowi-a"]); err != nil {
 		return err
 	}
-	var prep, sw []float64
+	var prep, sw, swStop []float64
 	for i := 0; i < 3; i++ {
 		target := "slowi-b"
 		if i%2 == 1 {
@@ -1427,14 +1546,17 @@ func (b *bench) ingressScenarios(n int) error {
 			return err
 		}
 		prep = append(prep, ms(d))
-		d, err = b.oarJSON(nil, "--bundle", b.digests[target], "reload", "--name", "svc")
+		var r runOut
+		d, err = b.oarJSON(&r, "--bundle", b.digests[target], "reload", "--name", "svc")
 		if err != nil {
 			return err
 		}
 		sw = append(sw, ms(d))
+		swStop = append(swStop, r.Result.Timings.StopOld/1e6)
 	}
 	b.add(g, "standby.switch", "慢启动应用（初始化 3 秒）+ 热备：切换耗时", "ms", true, sw...).Note =
 		fmt.Sprintf("热备准备（prepare --start，提前进行，不计入切换）p50 %.0f ms", median(prep))
+	b.add(g, "standby.stopold", "热备切换：等待旧实例退出（StopOld，guest 内）", "ms", true, swStop...)
 	b.rm("svc")
 	return nil
 }
