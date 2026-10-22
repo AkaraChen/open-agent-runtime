@@ -192,15 +192,17 @@ type initProc struct {
 // a reused pid). This is runc's own derivation of the status
 // (Container.runType):
 //
-//	no state.json                                      deleted ("container does not exist")
+//	no state directory                                 deleted ("container does not exist")
 //	/proc/<pid>/stat gone, other start time, Z or X    stopped
 //	<id>/exec.fifo exists (`runc start` removes it)    created
 //	otherwise                                          running
 //
 // state.json is libcontainer's format; these three fields are the same in
 // runc 1.4 and 1.5 and have been since 1.0. Anything unexpected is returned
-// as an error, and FastState then asks runc. Not modelled: "paused" (a
-// frozen cgroup), which the agent never uses.
+// as an error, and FastState then asks runc: that includes a state directory
+// without a state.json (runc creating or removing the container, or a runtime
+// that keeps other files, such as crun), which is not "does not exist". Not
+// modelled: "paused" (a frozen cgroup), which the agent never uses.
 func (r *Runc) StateFile(id string) (runcState, error) {
 	ip, err := r.readInit(id)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -236,19 +238,33 @@ func (r *Runc) FastState(ctx context.Context, id string) (runcState, error) {
 	if err == nil {
 		return st, nil
 	}
-	warnOnce("state-file", "cannot read container state from runc's files (%v); asking \"runc state\" instead", err)
+	if !errors.Is(err, errNoStateFile) { // expected while runc creates or removes a container
+		warnOnce("state-file", "cannot read container state from runc's files (%v); asking \"runc state\" instead", err)
+	}
 	return r.State(ctx, id)
 }
 
+// errNoStateFile means that a container's state directory exists but holds
+// no state.json: runc is creating or removing the container (briefly), or the
+// runtime does not keep libcontainer's files (crun keeps others, and has no
+// state.json at all). The runtime has to be asked: it must not be taken for
+// "the container does not exist".
+var errNoStateFile = errors.New("state directory without state.json")
+
 // readInit reads the init process of a container from its state.json. A
-// container runc does not know has no file: the error then satisfies
-// errors.Is(err, fs.ErrNotExist).
+// container runc does not know has no state directory: the error then
+// satisfies errors.Is(err, fs.ErrNotExist).
 func (r *Runc) readInit(id string) (initProc, error) {
 	if r.Root == "" || id == "" || strings.ContainsRune(id, filepath.Separator) {
 		return initProc{}, fmt.Errorf("no state directory for container %q in %q", id, r.Root)
 	}
 	f, err := os.Open(filepath.Join(r.Root, id, "state.json"))
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if _, serr := os.Stat(filepath.Join(r.Root, id)); serr == nil {
+				return initProc{}, errNoStateFile
+			}
+		}
 		return initProc{}, err
 	}
 	defer f.Close()
@@ -403,7 +419,8 @@ func (r *Runc) Kill(ctx context.Context, id, sig string) error {
 		case errors.Is(err, errInitGone):
 			// what `runc kill` says about a container that is not running
 			return errors.New("runc kill: container not running")
-		case !errors.Is(err, fs.ErrNotExist): // a container runc does not know gets runc's error
+		case !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errNoStateFile):
+			// (a container runc does not know gets runc's own error)
 			warnOnce("pidfd", "cannot signal a container through a pidfd (%v); asking \"runc kill\" instead", err)
 		}
 	}
@@ -536,6 +553,8 @@ func (r *Runc) WaitStopped(ctx context.Context, id string, timeout time.Duration
 		warnOnce("pidfd", "cannot wait for a container through a pidfd (%v); polling its state instead", err)
 	case errors.Is(err, errInitGone), errors.Is(err, fs.ErrNotExist):
 		return true // stopped, or not known to runc any more
+	case errors.Is(err, errNoStateFile):
+		// not libcontainer's files: the runtime's own answer, below
 	default:
 		warnOnce("pidfd", "cannot wait for a container through a pidfd (%v); polling its state instead", err)
 	}

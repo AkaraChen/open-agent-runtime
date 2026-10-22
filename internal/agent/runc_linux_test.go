@@ -167,12 +167,17 @@ func writeState(t *testing.T, root, id string, pid int, start uint64) {
 	}
 }
 
-// fakeRunc is a runc binary that records its arguments and answers `state`.
-func fakeRunc(t *testing.T) (bin, calls string) {
+// fakeRunc is a runc binary that records its arguments and answers `state`
+// (with the given status, "running" by default).
+func fakeRunc(t *testing.T, status ...string) (bin, calls string) {
 	t.Helper()
+	st := "running"
+	if len(status) > 0 {
+		st = status[0]
+	}
 	dir := t.TempDir()
 	bin, calls = filepath.Join(dir, "runc"), filepath.Join(dir, "calls")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$3\" in state) echo '{\"id\":\"fake\",\"pid\":42,\"status\":\"running\"}' ;; esac\n", calls)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$3\" in state) echo '{\"id\":\"fake\",\"pid\":42,\"status\":\"%s\"}' ;; esac\n", calls, st)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +273,54 @@ func TestStateFileUnreadable(t *testing.T) {
 	}
 	if st, err := (&Runc{}).StateFile("c1"); err == nil {
 		t.Errorf("no runc root: got %+v, want an error", st)
+	}
+}
+
+// A state directory without a state.json is not a container that does not
+// exist: runc is busy creating or removing it, or the runtime keeps other
+// files (crun does). The runtime is asked, for the state, the signal and the
+// wait; nothing is concluded from the missing file.
+func TestStateDirWithoutStateFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "c1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(root, "c1", "status"), []byte("running"), 0o644) // what crun keeps
+	if _, err := (&Runc{Root: root}).StateFile("c1"); !errors.Is(err, errNoStateFile) || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("got %v, want errNoStateFile and not a missing container", err)
+	}
+	if _, err := (&Runc{Root: root}).StateFile("c2"); err != nil {
+		t.Fatalf("a container without a state directory is deleted, got %v", err)
+	}
+	ctx := context.Background()
+
+	bin, calls := fakeRunc(t, "running")
+	r := Runc{Binary: bin, Root: root}
+	if st, err := r.FastState(ctx, "c1"); err != nil || st.Status != "running" || st.Pid != 42 {
+		t.Fatalf("FastState: got %+v %v, want the runtime's answer", st, err)
+	}
+	if err := r.Kill(ctx, "c1", "TERM"); err != nil {
+		t.Fatal(err)
+	}
+	// a runtime that says running: the wait must not return early
+	if r.WaitStopped(ctx, "c1", 150*time.Millisecond) {
+		t.Fatal("WaitStopped took a state directory without state.json for a stopped container")
+	}
+	want := []string{"--root " + root + " state c1", "--root " + root + " kill c1 TERM"}
+	if got := execs(t, calls); len(got) < 4 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("runtime calls: got %q, want %q first and then state polls", got, want)
+	}
+	for _, c := range execs(t, calls)[2:] {
+		if c != want[0] {
+			t.Fatalf("unexpected call %q", c)
+		}
+	}
+
+	// and one that says stopped ends the wait
+	bin, _ = fakeRunc(t, "stopped")
+	r = Runc{Binary: bin, Root: root}
+	if !r.WaitStopped(ctx, "c1", 10*time.Second) {
+		t.Fatal("the runtime said stopped, but the wait went on")
 	}
 }
 
