@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
@@ -48,7 +49,9 @@ func IRCacheDir() string { return filepath.Join(CacheDir(), "iets") }
 // Source returns the checkout named by ref: a directory as it is, or a
 // nixpkgs commit downloaded once into SourceDir. The download is extracted
 // next to its final place and renamed into it, so a directory that exists
-// is complete.
+// is complete. Callers in one process that ask for the same commit at once
+// share one download; processes that do so download it each, and the first
+// to finish publishes it.
 func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, error) {
 	if log == nil {
 		log = io.Discard
@@ -64,7 +67,21 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 		return dir, nil
 	}
 	dir := SourceDir(ref)
-	if _, err := os.Stat(filepath.Join(dir, "default.nix")); err == nil {
+	if sourceReady(dir) {
+		return dir, nil
+	}
+	// PERF: the build can ask for the same tree from several places at once
+	// (each platform's nix stage, and the nix-eval child it starts), and
+	// fetching it is 51 MB of download and 250 MB of tar. One caller per
+	// directory fetches; the others wait for it and find the tree in place,
+	// instead of downloading it again. A caller whose context ends stops
+	// waiting, and a failed fetch leaves the next caller to try again.
+	unlock, err := lockSource(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if sourceReady(dir) {
 		return dir, nil
 	}
 	if mirror == "" {
@@ -102,11 +119,36 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 	}
 	if err := os.Rename(tmp, dir); err != nil {
 		// another process finished first
-		if _, serr := os.Stat(filepath.Join(dir, "default.nix")); serr == nil {
+		if sourceReady(dir) {
 			return dir, nil
 		}
 		return "", err
 	}
 	fmt.Fprintf(log, "  %d files in %s\n", n, time.Since(start).Round(time.Millisecond))
 	return dir, nil
+}
+
+// sourceReady reports whether dir holds a complete checkout: it is renamed
+// into place only after it was extracted.
+func sourceReady(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "default.nix"))
+	return err == nil
+}
+
+// sourceLocks holds one lock per checkout directory: a channel with room for
+// one token, which unlike a mutex can be waited on together with a context.
+var sourceLocks sync.Map
+
+func lockSource(ctx context.Context, dir string) (unlock func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err // select would pick at random between a free lock and a done context
+	}
+	v, _ := sourceLocks.LoadOrStore(dir, make(chan struct{}, 1))
+	lock := v.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+		return func() { <-lock }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

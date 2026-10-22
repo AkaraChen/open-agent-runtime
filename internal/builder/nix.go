@@ -46,7 +46,8 @@ func evalKey(rev, system, attr string) string { return rev + "/" + system + "/" 
 // evalPackages resolves attribute names to output store paths. Results are
 // cached in artifacts/manifests/nix-eval.json; the evaluator runs only for
 // attributes that were never evaluated at this revision, as a child
-// `oar nix-eval` process (docs/design/embedded-nix-evaluator.md).
+// `oar nix-eval` process (docs/design/embedded-nix-evaluator.md), once this
+// process has fetched the nixpkgs tree it evaluates.
 func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map[string]evalResult, error) {
 	b.evalMu.Lock()
 	defer b.evalMu.Unlock()
@@ -71,6 +72,19 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 	}
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
 	b.stats(func(st *Stats) { st.EvaluatedAttr += len(missing) })
+	// PERF: fetch the nixpkgs tree here, in this process, so that the child
+	// finds it in place. It is the longest step of the first build on a
+	// machine (the evaluation itself is 0.3 s warm, 1 s with the evaluator's
+	// own cache cold), and this way it begins as soon as the nix stage knows
+	// it has work to do, rather than after the child process has been
+	// started and has parsed its flags and the config. Nothing is fetched
+	// when every attribute is cached. A second platform waits on evalMu, so
+	// it finds the tree downloaded instead of starting another download; if
+	// another oar process fetches the same revision at the same time, both
+	// download it and the first to finish publishes it (Source).
+	if _, err := nixeval.Source(b.ctx, rev, b.cfg.Runtime.NixpkgsMirror, b.opts.Log); err != nil {
+		return nil, err
+	}
 	child := nixeval.Child{Log: b.opts.Log}
 	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing, Mirror: b.cfg.Runtime.NixpkgsMirror})
 	if err != nil {

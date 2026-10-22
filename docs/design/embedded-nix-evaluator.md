@@ -241,7 +241,10 @@ parses the tar and reads each file's content, and a few create the
 directories and write the files, with at most 64 MiB of content in flight.
 The result is that of extracting entry by entry: the same modes, links and
 last-entry-wins for a path named twice; an entry that would be written
-through a symlink of the archive is refused.
+through a symlink of the archive is refused. The builder fetches the tree
+itself, at the start of its nix stage, and only then starts the
+`oar nix-eval` child, which finds it in place; callers of one process share
+one download.
 
 The iets IR cache lives at `<cache>/iets/` so a second evaluation at the
 same revision compiles no nixpkgs file twice.
