@@ -26,6 +26,17 @@ done
 if [ "$KARCH" = x86_64 ]; then
   grep -q "^CONFIG_KERNEL_LZ4=y" "$B/.config" || { echo "missing CONFIG_KERNEL_LZ4=y" >&2; exit 1; }
 fi
+# Kconfig drops a request that conflicts with a dependency or a select
+# without failing. Check every line of the fragments, so that a trimmed option
+# that something selects again (and costs its boot time again) is noticed.
+for f in /guest/kernel.config "/guest/kernel-$ARCH_NAME.config"; do
+  while IFS= read -r line; do
+    case $line in
+      CONFIG_*=n) ! grep -qE "^${line%=n}=[ym]$" "$B/.config" || { echo "${line%=n} is still enabled: something selects it" >&2; exit 1; } ;;
+      CONFIG_*=*) grep -qxF "$line" "$B/.config" || { echo "missing $line" >&2; exit 1; } ;;
+    esac
+  done < "$f"
+done
 echo ">> building $KIMAGE ($KARCH, $(nproc) jobs)"
 $M -j"$(nproc)" "$KIMAGE" >/dev/null
 cp "$B/$KPATH" /out/kernel
