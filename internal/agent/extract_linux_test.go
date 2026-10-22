@@ -5,10 +5,13 @@ package agent
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +378,168 @@ func TestExtractManyDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, fmt.Sprintf("d%d/e/f", 3*maxDirFds-1))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// pattern returns n bytes that differ from place to place, so that a short
+// or misplaced copy shows.
+func pattern(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i*7 + i>>8)
+	}
+	return b
+}
+
+// File data arrives intact whichever way it gets into the file, streamed or
+// copied from the archive on disk, at sizes around the copy buffer's.
+func TestExtractFileData(t *testing.T) {
+	sizes := []int{0, 1, 511, 512, 513, copyBufSize - 1, copyBufSize, copyBufSize + 1, 3*copyBufSize + 7}
+	var hs []*tar.Header
+	bodies := map[string]string{}
+	for _, n := range sizes {
+		name := fmt.Sprintf("d/f%d", n)
+		hs = append(hs, &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o640})
+		bodies[name] = string(pattern(n))
+	}
+	archive := mkTar(t, hs, bodies).Bytes()
+	onDisk := filepath.Join(t.TempDir(), "a.tar")
+	if err := os.WriteFile(onDisk, archive, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []string{"stream", "in place"} {
+		t.Run(route, func(t *testing.T) {
+			var src io.Reader = bytes.NewReader(archive)
+			if route == "in place" {
+				f, err := os.Open(onDisk)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				if src, err = newTarFile(f); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dest := t.TempDir()
+			if n, err := extractTar(src, dest); err != nil || n != len(sizes) {
+				t.Fatalf("extracted %d entries, %v", n, err)
+			}
+			for _, n := range sizes {
+				p := filepath.Join(dest, fmt.Sprintf("d/f%d", n))
+				st, err := os.Lstat(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.Mode() != 0o640 || st.Size() != int64(n) || !st.ModTime().Equal(time.Unix(1, 0)) {
+					t.Errorf("%d bytes: mode %v, size %d, mtime %v", n, st.Mode(), st.Size(), st.ModTime())
+				}
+				if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, pattern(n)) {
+					t.Errorf("%d bytes: wrong content (%d bytes read, %v)", n, len(got), err)
+				}
+			}
+		})
+	}
+}
+
+// Files, directories and symlinks get the archive's times to the nanosecond,
+// the access time being the modification time unless the archive has one.
+func TestExtractTimes(t *testing.T) {
+	mt, at := time.Unix(1_700_000_000, 123_456_789), time.Unix(1_600_000_000, 987_654_321)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range []*tar.Header{
+		{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: mt, AccessTime: at},
+		{Name: "d/f", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, ModTime: mt, AccessTime: at},
+		{Name: "d/g", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, ModTime: mt},
+		{Name: "d/l", Typeflag: tar.TypeSymlink, Linkname: "f", ModTime: mt, AccessTime: at},
+	} {
+		h.Format = tar.FormatPAX
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			tw.Write([]byte("x"))
+		}
+	}
+	tw.Close()
+	dest := t.TempDir()
+	if _, err := extractTar(&buf, dest); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string][2]time.Time{"d": {at, mt}, "d/f": {at, mt}, "d/g": {mt, mt}, "d/l": {at, mt}} {
+		var st unix.Stat_t
+		if err := unix.Lstat(filepath.Join(dest, p), &st); err != nil {
+			t.Fatal(err)
+		}
+		if got := time.Unix(st.Atim.Unix()); !got.Equal(want[0]) {
+			t.Errorf("%s: atime %v, want %v", p, got, want[0])
+		}
+		if got := time.Unix(st.Mtim.Unix()); !got.Equal(want[1]) {
+			t.Errorf("%s: mtime %v, want %v", p, got, want[1])
+		}
+	}
+}
+
+// An archive on disk is copied out by the kernel, or, where the kernel will
+// not copy between the two files, by reading and writing.
+func TestTarFileCopyTo(t *testing.T) {
+	dir := t.TempDir()
+	data := pattern(3*copyBufSize + 7)
+	src := filepath.Join(dir, "src")
+	if err := os.WriteFile(src, append([]byte("skipped"), data...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tf, err := newTarFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name  string
+		flags int
+	}{
+		{"kernel", 0},
+		{"fallback", unix.O_APPEND}, // copy_file_range refuses to write to an O_APPEND file
+	} {
+		for _, n := range []int{1, copyBufSize, len(data)} {
+			dst := filepath.Join(dir, fmt.Sprintf("%s-%d", c.name, n))
+			fd, err := unix.Open(dst, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|c.flags, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := &fileWriter{fd: fd, name: dst}
+			err = tf.copyTo(w, int64(len("skipped")), int64(n))
+			unix.Close(fd)
+			if err != nil {
+				t.Fatalf("%s, %d bytes: %v", c.name, n, err)
+			}
+			if got, _ := os.ReadFile(dst); !bytes.Equal(got, data[:n]) {
+				t.Errorf("%s, %d bytes: %d bytes copied, not the same", c.name, n, len(got))
+			}
+			if c.name == "fallback" && w.buf == nil {
+				t.Errorf("%d bytes: copied without the buffer, so not by the fallback", n)
+			}
+		}
+	}
+}
+
+// A failed write reports the file it was for, with what was written before.
+func TestFileWriterError(t *testing.T) {
+	fd, err := unix.Open("/dev/full", unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer unix.Close(fd)
+	w := &fileWriter{fd: fd, name: "/dest/some/file"}
+	n, err := w.Write([]byte("data"))
+	if n != 0 || !errors.Is(err, unix.ENOSPC) || !strings.Contains(err.Error(), "/dest/some/file") {
+		t.Errorf("Write = %d, %v", n, err)
+	}
+	if err := w.copyFrom(strings.NewReader("data")); !errors.Is(err, unix.ENOSPC) {
+		t.Errorf("copyFrom: %v", err)
 	}
 }
