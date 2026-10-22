@@ -139,6 +139,13 @@ NEW=$("$OAR" ps --json | jq -r --arg n "$NAME" '.containers[] | select(.name==$n
 [ "$OLD" != "$NEW" ] || fail "reload kept the same instance"
 "$OAR" ps --json | jq -e --arg o "$OLD" '[.containers[] | select(.id==$o)] | length == 0' >/dev/null || fail "old instance not destroyed"
 [ "$("$OAR" ps --json | jq -r --arg n "$NAME" '.containers[] | select(.name==$n) | .status')" = running ] || fail "new instance not running"
+# my-agent installs its SIGTERM handler after its start-up checks (node,
+# python3, git: seconds in an emulated guest), and reload does not wait for
+# it: SIGTERM sent earlier ends it by the default action, without a log line
+for i in $(seq 1 50); do
+  oar logs --name "$NAME" | grep -q "my-agent ready" && break
+  sleep 0.2
+done
 oar stop --name "$NAME"
 [ "$("$OAR" ps --json | jq -r --arg n "$NAME" '.containers[] | select(.name==$n) | .status')" = stopped ] || fail "not stopped"
 oar logs --name "$NAME" | grep -q "received terminated" || fail "my-agent did not get SIGTERM"
