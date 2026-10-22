@@ -47,9 +47,9 @@ func TestReadUsageCountsChildren(t *testing.T) {
 	if used.minflt <= 0 {
 		t.Errorf("no page faults counted for a new process: %+v", used)
 	}
-	if used.runcExecs != 0 {
-		t.Errorf("a child that is not runc counted as %d execs", used.runcExecs)
-	}
+	// the runc exec count is not checked here: Servers created by other
+	// tests look runc's version up in the background (New), and that exec
+	// can land in this window; TestRuncExecsCountsEveryCommand covers it
 }
 
 // fakeRunc returns a Runc whose binary is a script: `state` prints the
