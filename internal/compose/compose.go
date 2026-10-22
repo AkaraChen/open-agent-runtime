@@ -101,8 +101,9 @@ type Bundle struct {
 	// Format invalidates cached templates when the generator changes.
 	Format int    `json:"format"`
 	Digest string `json:"digest"`
-	// StoreLayers are the closure's store path directories (sorted by
-	// name), linked by the agent into the read-only StoreView.
+	// StoreLayers are the closure's store path directories (largest
+	// first, see StoreLayers), linked by the agent into the read-only
+	// StoreView in this order.
 	StoreLayers []string `json:"storeLayers,omitempty"`
 	StoreView   string   `json:"storeView,omitempty"`
 	// Layers are the other overlay lower directories, highest priority
@@ -218,16 +219,26 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// StoreLayers returns the closure's store path layers, sorted by name.
+// StoreLayers returns the closure's store path layers, largest first (by
+// the size recorded in the lock, then by name).
+//
+// PERF: the agent links the layers into the view in this order, in
+// parallel. A few store paths hold most of a closure's entries, and
+// starting them last leaves the other workers idle while one of them
+// finishes; starting them first fills the tail of the build with small
+// paths. The size is that of the store path's tar, a stand-in for its
+// number of entries (the cost of linking it) that the lock does not record.
 func StoreLayers(l Layout, pl *manifest.PlatformLock) []string {
-	names := make([]string, 0, len(pl.StorePaths))
-	for _, sp := range pl.StorePaths {
-		names = append(names, sp.Name())
-	}
-	sort.Strings(names)
-	out := make([]string, len(names))
-	for i, n := range names {
-		out[i] = l.StoreLayer(n)
+	sps := append([]manifest.StorePath(nil), pl.StorePaths...)
+	sort.Slice(sps, func(i, j int) bool {
+		if sps[i].Size != sps[j].Size {
+			return sps[i].Size > sps[j].Size
+		}
+		return sps[i].Name() < sps[j].Name()
+	})
+	out := make([]string, len(sps))
+	for i, sp := range sps {
+		out[i] = l.StoreLayer(sp.Name())
 	}
 	return out
 }

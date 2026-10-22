@@ -51,9 +51,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		// started by view.prepare during the warm: let it finish (with
 		// groups.mu held, like a build done here; link jobs do not take it)
 		delete(s.groups.builds, view)
-		for _, layer := range b.StoreLayers {
-			vb.link(layer) // any layer it has not seen arrive
-		}
+		vb.linkAll(b.StoreLayers) // any layer it has not seen arrive
 		vb.mu.Lock()
 		if len(vb.pending) > 0 { // compose checked that all are warm
 			if vb.err == nil {
@@ -88,7 +86,10 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	// store paths are linked in parallel: the cost is one syscall per file
+	// store paths are linked in parallel: the cost is one syscall per file.
+	// PERF: they are handed out in the order of b.StoreLayers, biggest
+	// first (compose.StoreLayers), so that the build ends with small ones
+	// instead of waiting for a big one that was started late.
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
 	var wg sync.WaitGroup
@@ -451,8 +452,9 @@ var viewLinkers = make(chan struct{}, runtime.NumCPU()*2)
 // while it is not zero.
 var linkJobs atomic.Int32
 
-// prepareView starts building view for layers unless it exists or is
-// already being built.
+// prepareView starts building view for layers (biggest first, as
+// compose.StoreLayers lists them) unless it exists or is already being
+// built.
 func (s *Server) prepareView(layers []string, view string) {
 	if len(layers) == 0 {
 		return
@@ -483,14 +485,10 @@ func (s *Server) prepareView(layers []string, view string) {
 		s.groups.builds = map[string]*viewBuild{}
 	}
 	// registered before looking at the cache: a store path published in
-	// between is linked either by layerReady or by the loop below
+	// between is linked either by layerReady or by linkAll
 	s.groups.builds[view] = vb
 	s.groups.mu.Unlock()
-	for _, l := range layers {
-		if _, err := os.Lstat(l); err == nil {
-			vb.link(l)
-		}
-	}
+	vb.linkAll(layers)
 }
 
 // layerReady links a newly published store path into the views being
@@ -509,33 +507,55 @@ func (s *Server) layerReady(layer string) {
 
 // link links layer into the view in the background if it is still
 // pending and present.
-func (vb *viewBuild) link(layer string) {
+func (vb *viewBuild) link(layer string) { vb.linkAll([]string{layer}) }
+
+// linkAll links those of layers that are still pending and present into
+// the view in the background. The link jobs start in the order of layers.
+//
+// PERF: callers pass the biggest store paths first. One goroutine takes
+// the slots of viewLinkers for the jobs one by one; if every job waited
+// for a slot in a goroutine of its own, they would get them in the order
+// the scheduler runs those goroutines, and a big store path could be left
+// for the end of the build.
+func (vb *viewBuild) linkAll(layers []string) {
+	var jobs []string
 	vb.mu.Lock()
-	if !vb.pending[layer] {
-		vb.mu.Unlock()
+	for _, layer := range layers {
+		if !vb.pending[layer] {
+			continue
+		}
+		if _, err := os.Lstat(layer); err != nil {
+			continue // not uploaded yet
+		}
+		delete(vb.pending, layer)
+		jobs = append(jobs, layer)
+	}
+	vb.inflight += len(jobs)
+	linkJobs.Add(int32(len(jobs)))
+	vb.mu.Unlock()
+	if len(jobs) == 0 {
 		return
 	}
-	if _, err := os.Lstat(layer); err != nil {
-		vb.mu.Unlock()
-		return // not uploaded yet
-	}
-	delete(vb.pending, layer)
-	vb.inflight++
-	linkJobs.Add(1)
-	vb.mu.Unlock()
 	go func() {
-		viewLinkers <- struct{}{}
-		err := linkStorePath(layer, vb.tmp)
-		<-viewLinkers
-		linkJobs.Add(-1)
-		vb.mu.Lock()
-		if err != nil && vb.err == nil {
-			vb.err = err
+		for _, layer := range jobs {
+			viewLinkers <- struct{}{}
+			go vb.run(layer)
 		}
-		vb.inflight--
-		vb.finish()
-		vb.mu.Unlock()
 	}()
+}
+
+// run links layer into the view, in a slot of viewLinkers that it frees.
+func (vb *viewBuild) run(layer string) {
+	err := linkStorePath(layer, vb.tmp)
+	<-viewLinkers
+	linkJobs.Add(-1)
+	vb.mu.Lock()
+	if err != nil && vb.err == nil {
+		vb.err = err
+	}
+	vb.inflight--
+	vb.finish()
+	vb.mu.Unlock()
 }
 
 // finish closes done once nothing is pending or in flight (vb.mu held).

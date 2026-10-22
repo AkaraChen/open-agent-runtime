@@ -5,8 +5,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/compose"
+	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 )
 
 func TestUnescapeMountinfo(t *testing.T) {
@@ -147,6 +150,128 @@ func BenchmarkStoreView(b *testing.B) {
 			b.Fatal(err)
 		}
 		i++
+	}
+}
+
+// closurePath is a store path of a benchmark closure and the size the lock
+// records for it.
+type closurePath struct {
+	name string
+	size int64
+}
+
+// skewedClosure creates the store paths of a closure in the cache of s: n
+// paths whose entries follow 1/rank, a few big ones among many small ones
+// as in a real closure, with names that say nothing about their size. The
+// lock records sizes proportional to the entries, which is the best case
+// for ordering by size.
+func skewedClosure(tb testing.TB, s *Server, n, maxEntries int) []closurePath {
+	ranks := rand.New(rand.NewPCG(1, 2)).Perm(n)
+	out := make([]closurePath, n)
+	for i := range out {
+		name := fmt.Sprintf("%032d-p%d", i, i)
+		entries := max(1, maxEntries/(ranks[i]+1))
+		root := s.layout.StorePath(name)
+		for e := 0; e < entries; e++ {
+			dir := filepath.Join(root, fmt.Sprintf("d%d", e/16)) // 16 files to a directory
+			if e%16 == 0 {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					tb.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", e)), nil, 0o644); err != nil {
+				tb.Fatal(err)
+			}
+		}
+		out[i] = closurePath{name, int64(entries) << 10}
+	}
+	return out
+}
+
+// tarClosure extracts the store path tars in dir into the cache of s. The
+// size of a store path is that of its tar, as the lock records it.
+func tarClosure(tb testing.TB, s *Server, dir string) []closurePath {
+	tars, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
+	if len(tars) == 0 {
+		tb.Skipf("no tar files in %s", dir)
+	}
+	out := make([]closurePath, len(tars))
+	for i, p := range tars {
+		name := strings.TrimSuffix(filepath.Base(p), ".tar")
+		f, err := os.Open(p)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			tb.Fatal(err)
+		}
+		layer := s.layout.StoreLayer(name)
+		if err := os.MkdirAll(layer, 0o755); err != nil {
+			tb.Fatal(err)
+		}
+		_, err = extractTar(f, layer)
+		f.Close()
+		if err != nil {
+			tb.Fatal(err)
+		}
+		out[i] = closurePath{name, fi.Size()}
+	}
+	return out
+}
+
+// BenchmarkStoreViewOrder measures building the view of a closure whose
+// store paths differ a lot in size, with the store paths in an arbitrary
+// order ("unordered": eight fixed shuffles, as store path names are
+// hashes) and biggest first, as compose.StoreLayers lists them
+// ("largest-first"), through the pool of ensureStoreView and as the jobs of
+// a prepared build. The closure is synthetic, or the store path tars in
+// $OAR_BENCH_TARS (see BenchmarkLinkTree) with the sizes of the tars. The
+// synthetic sizes follow the entries, the best case for ordering by size;
+// tar sizes predict the link time of a real store path much worse. Each
+// build is removed again, untimed; use -benchtime=24x or the like.
+func BenchmarkStoreViewOrder(b *testing.B) {
+	s := rootServer(b)
+	var paths []closurePath
+	if dir := os.Getenv("OAR_BENCH_TARS"); dir != "" {
+		paths = tarClosure(b, s, dir)
+	} else {
+		paths = skewedClosure(b, s, 120, 3500)
+	}
+	lock := &manifest.PlatformLock{}
+	for _, p := range paths {
+		lock.StorePaths = append(lock.StorePaths, manifest.StorePath{Path: "/nix/store/" + p.name, Size: p.size})
+	}
+	biggestFirst := compose.StoreLayers(s.layout, lock)
+	rng := rand.New(rand.NewPCG(3, 4))
+	var shuffles [8][]string
+	for i := range shuffles {
+		shuffles[i] = slices.Clone(biggestFirst)
+		rng.Shuffle(len(shuffles[i]), func(a, c int) { shuffles[i][a], shuffles[i][c] = shuffles[i][c], shuffles[i][a] })
+	}
+	for _, mode := range []string{"pool", "prepared"} {
+		for _, order := range []string{"unordered", "largest-first"} {
+			b.Run(mode+"/"+order, func(b *testing.B) {
+				for i := 0; b.Loop(); i++ {
+					layers := biggestFirst
+					if order == "unordered" {
+						layers = shuffles[i%len(shuffles)]
+					}
+					view := s.layout.StoreView(fmt.Sprintf("%s-%s-%d", mode, order, i))
+					bundle := &compose.Bundle{StoreLayers: layers, StoreView: view}
+					if mode == "prepared" {
+						s.prepareView(layers, view)
+					}
+					if err := s.ensureStoreView(bundle); err != nil {
+						b.Fatal(err)
+					}
+					b.StopTimer()
+					os.RemoveAll(view)
+					os.Remove(view + ".done")
+					b.StartTimer()
+				}
+			})
+		}
 	}
 }
 
@@ -365,6 +490,53 @@ func TestLinkJobsBalanceOnError(t *testing.T) {
 		if _, err := os.Stat(b.StoreView + ".done"); err == nil {
 			t.Fatalf("%s: failed view marked complete", mode)
 		}
+	}
+}
+
+// The link jobs of a prepared build start in the order of its layers, both
+// those present when it starts and those found when it is completed.
+func TestPrepareViewLinksInOrder(t *testing.T) {
+	s := plainServer(t)
+	b := fakeBundle(t, s, "o", 12)
+	slices.Reverse(b.StoreLayers) // not the name order
+	// with one slot the jobs run one by one, in the order they got it
+	slots, link := viewLinkers, linkStorePath
+	viewLinkers = make(chan struct{}, 1)
+	var mu sync.Mutex
+	var started []string
+	linkStorePath = func(layer, tmp string) error {
+		mu.Lock()
+		started = append(started, layer)
+		mu.Unlock()
+		return link(layer, tmp)
+	}
+	t.Cleanup(func() { viewLinkers, linkStorePath = slots, link })
+	// the last four are not there when the build starts, and arrive
+	// without layerReady: ensureStoreView finds them
+	late := b.StoreLayers[8:]
+	for _, l := range late {
+		os.Rename(l, l+".uploading")
+	}
+	s.prepareView(b.StoreLayers, b.StoreView)
+	waitFor(t, "the first link jobs", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(started) == 8
+	})
+	for _, l := range late {
+		os.Rename(l+".uploading", l)
+	}
+	if err := s.ensureStoreView(b); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(started, b.StoreLayers) {
+		base := func(layers []string) (out []string) {
+			for _, l := range layers {
+				out = append(out, filepath.Base(l))
+			}
+			return
+		}
+		t.Fatalf("link jobs started in the order\n%v\nwant\n%v", base(started), base(b.StoreLayers))
 	}
 }
 
