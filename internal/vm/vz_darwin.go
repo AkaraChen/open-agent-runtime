@@ -12,8 +12,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/Code-Hex/vz/v3"
-	"github.com/Code-Hex/vz/v3/vmnet"
+	"github.com/Code-Hex/vz/v4"
+	"github.com/Code-Hex/vz/v4/vmnet"
 	"golang.org/x/sys/unix"
 )
 
@@ -155,10 +155,7 @@ func vzNetwork() (vz.NetworkDeviceAttachment, *vmnet.Network, string, error) {
 	subnet, err := freeGuestSubnet(used)
 	var cfg *vmnet.NetworkConfiguration
 	if err == nil {
-		cfg, err = vmnet.NewNetworkConfiguration(vmnet.SharedMode)
-	}
-	if err == nil {
-		err = cfg.SetIPv4Subnet(subnet)
+		cfg, err = vmnet.NewNetworkConfiguration(vmnet.ModeShared, vmnet.WithIPv4Subnet(subnet))
 	}
 	var network *vmnet.Network
 	if err == nil {
@@ -166,7 +163,7 @@ func vzNetwork() (vz.NetworkDeviceAttachment, *vmnet.Network, string, error) {
 	}
 	var att vz.NetworkDeviceAttachment
 	if err == nil {
-		att, err = vz.NewVmnetNetworkDeviceAttachment(network)
+		att, err = vz.NewVMNetNetworkDeviceAttachment(network)
 	}
 	if err == nil {
 		return att, network, guestNetSpec(subnet), nil
