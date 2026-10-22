@@ -100,7 +100,9 @@ What can be set, when the defaults do not fit:
 - the state directory follows `$XDG_DATA_HOME` (default `~/.local/share/oar`), the evaluator cache
   `$XDG_CACHE_HOME` on Linux;
 - debugging: `oar vm start --guest-cmdline '...'` appends guest kernel parameters (hidden flag; the
-  `boot-profile` workflow uses it for `initcall_debug`).
+  `boot-profile` workflow uses it for `initcall_debug`); `oar vm profile --kind cpu --seconds 10 -o cpu.pprof`
+  (hidden) saves a Go profile of the guest agent for `go tool pprof` (kinds: cpu, heap, allocs,
+  goroutine, block, mutex, trace).
 
 The Nix evaluator is the first available of the embedded one, `nix-instantiate` and Docker; if the
 embedded evaluator crashes, the build continues with the next available one.

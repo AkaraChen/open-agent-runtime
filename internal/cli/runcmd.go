@@ -136,6 +136,10 @@ type warmStats struct {
 	Compressed bool          `json:"compressed,omitempty"`
 	View       time.Duration `json:"view,omitempty"`
 	Flush      time.Duration `json:"flush,omitempty"`
+	// PrecomposeCPUUser and PrecomposeCPUSys are the agent's CPU time during
+	// the Precompose round trip (process-wide, see proto.Timings).
+	PrecomposeCPUUser time.Duration `json:"precomposeCpuUser,omitempty"`
+	PrecomposeCPUSys  time.Duration `json:"precomposeCpuSys,omitempty"`
 }
 
 // warm uploads missing artifacts into the guest cache.
@@ -293,6 +297,7 @@ func (s *session) precompose(ctx context.Context, stats *warmStats) error {
 	flush := warmTuningFor(s.g).Flush
 	err := s.client.Call(ctx, proto.OpCompose, proto.ComposeArgs{Lock: s.lock, Flush: flush}, &res)
 	stats.View, stats.Flush = res.View, res.Flush
+	stats.PrecomposeCPUUser, stats.PrecomposeCPUSys = res.CPUUser, res.CPUSys
 	return err
 }
 

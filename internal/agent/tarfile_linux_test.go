@@ -7,6 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,6 +88,54 @@ func TestWarmPutByPath(t *testing.T) {
 	}
 	if l, err := os.Readlink(filepath.Join(b, "rootfs", "d/link")); err != nil || l != "small" {
 		t.Fatalf("symlink %q, %v", l, err)
+	}
+}
+
+// copy_file_range copies less than it was asked to when the request is
+// capped or a signal arrives (a CPU profile sends one every 10 ms); the loop
+// must carry on from where the kernel stopped.
+func TestTarFileCopyToShortCopies(t *testing.T) {
+	old := copyFileRangeMax
+	copyFileRangeMax = 4096
+	t.Cleanup(func() { copyFileRangeMax = old })
+
+	dir := t.TempDir()
+	data := make([]byte, 1<<20)
+	rand.New(rand.NewSource(1)).Read(data)
+	srcPath := filepath.Join(dir, "src")
+	if err := os.WriteFile(srcPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	tf, err := newTarFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyRange := func(off, n int64) ([]byte, error) {
+		dst, err := os.Create(filepath.Join(dir, "dst"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tf.copyTo(dst, off, n)
+		dst.Close()
+		got, _ := os.ReadFile(dst.Name())
+		return got, err
+	}
+	for _, c := range []struct{ off, n int64 }{{0, 1 << 20}, {10000, 100000}, {1<<20 - 5000, 5000}, {777, 1}} {
+		got, err := copyRange(c.off, c.n)
+		if err != nil {
+			t.Errorf("copy %d bytes at %d: %v", c.n, c.off, err)
+		} else if !bytes.Equal(got, data[c.off:c.off+c.n]) {
+			t.Errorf("copy %d bytes at %d: the copy differs from the source range", c.n, c.off)
+		}
+	}
+	// asking for more than the file holds is an error, not a short file
+	if _, err := copyRange(1<<20-100, 5000); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("a copy past the end of the file returned %v, want unexpected EOF", err)
 	}
 }
 
