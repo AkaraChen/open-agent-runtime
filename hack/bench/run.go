@@ -79,9 +79,7 @@ func runMain(args []string) error {
 		res: &Result{Backend: *backend, Platform: "linux/" + *arch, Profile: *profile, Started: time.Now()},
 	}
 	b.res.Host = hostDesc()
-	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
-		b.res.Commit = strings.TrimSpace(string(out))
-	}
+	b.res.Commit = oarCommit(oarAbs)
 	var err error
 	if b.data, err = os.MkdirTemp("", "oar-bench-home-"); err != nil {
 		return err
@@ -136,6 +134,19 @@ func runMain(args []string) error {
 }
 
 func logf(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
+
+// oarCommit is the commit the oar binary under test was built from: that of
+// the checkout it sits in, which in an A/B run (both builds measured by the
+// head's harness) is not the checkout the harness runs from. A binary outside
+// of any checkout gets the harness's own.
+func oarCommit(oar string) string {
+	for _, dir := range []string{filepath.Dir(oar), "."} {
+		if out, err := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD").Output(); err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
+}
 
 func hostDesc() string {
 	h, _ := os.Hostname()
