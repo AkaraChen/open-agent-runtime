@@ -4,14 +4,14 @@
 
 | Backend | Host | How it runs the guest |
 |---|---|---|
-| `vz` | macOS | Apple Virtualization.framework, virtio-vsock, NAT networking, sparse data disk |
+| `vz` | macOS 26+ | Apple Virtualization.framework, virtio-vsock, a vmnet NAT network on a subnet the host does not use, sparse data disk |
 | `kvm` | Linux | QEMU with KVM (falls back to TCG emulation), `microvm` machine with KVM (minimal ACPI, virtio-pci on its PCIe bridge), vhost-vsock |
 | `qemu` | Linux, macOS | QEMU with KVM, HVF or TCG; vsock on Linux, loopback TCP forward elsewhere |
 | `native` | Linux | no VM: the agent drives `runc` on the host kernel (requires root, via sudo) |
 | `wsl2` | Windows | imports the guest root filesystem as a WSL2 distribution (experimental) |
 | `android` | — | extension point (AVF / crosvm), planned |
 
-Defaults: `vz` on macOS (or `qemu` when the host has no hypervisor support), `native` on Linux, and
+Defaults: `vz` on macOS (or `qemu` before macOS 26 and when the host has no hypervisor support), `native` on Linux, and
 `wsl2` on Windows. Override the default with `--backend`, and list what works on the
 current host with `oar vm backends`.
 
@@ -24,9 +24,9 @@ lifecycle, resident guest) unless noted.
 |---|---|---|
 | Ubuntu | `native` | host kernel (amd64) |
 | Ubuntu | `kvm` | linux/amd64 (boots in under 1 s) |
-| macOS 15, Intel | `vz` | linux/amd64 |
-| macOS 15, Apple Silicon | `qemu` | linux/arm64 |
-| macOS 15, Apple Silicon | `vz` | not testable: hosted runners lack nested virtualization; the fallback to `qemu` is verified instead |
+| macOS 26, Intel | `vz` | linux/amd64 |
+| macOS 26, Apple Silicon | `qemu` | linux/arm64 |
+| macOS 26, Apple Silicon | `vz` | not testable: hosted runners lack nested virtualization; the fallback to `qemu` is verified instead |
 | Windows | — | unit tests and build only |
 
 ## Guest image

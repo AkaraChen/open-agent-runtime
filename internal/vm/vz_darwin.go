@@ -6,10 +6,9 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/netip"
-	"os"
 	"runtime"
-	"slices"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Code-Hex/vz/v4"
@@ -28,9 +27,20 @@ func (vzBackend) Name() string          { return "vz" }
 func (vzBackend) NeedsGuestImage() bool { return true }
 func (vzBackend) NeedsRoot() bool       { return false }
 
-// Available requires hypervisor support (kern.hv_support), which is absent
-// e.g. inside VMs on M1 hosts that cannot nest virtualization.
+// macOS26 reports whether a product version ("26.1", "15.6.1") is 26 or later.
+func macOS26(version string) bool {
+	major, _, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 26
+}
+
+// Available requires macOS 26 (the vmnet network API) and hypervisor
+// support (kern.hv_support), which is absent e.g. inside VMs on M1 hosts
+// that cannot nest virtualization.
 func (vzBackend) Available() error {
+	if v, err := unix.Sysctl("kern.osproductversion"); err != nil || !macOS26(v) {
+		return fmt.Errorf("the vz backend needs macOS 26 or later (this is macOS %s): it puts the guest on a vmnet network", v)
+	}
 	if v, err := unix.SysctlUint32("kern.hv_support"); err != nil || v != 1 {
 		return fmt.Errorf("Virtualization.framework is not available: the host has no hypervisor support (kern.hv_support unset; nested virtualization is unsupported here)")
 	}
@@ -39,7 +49,7 @@ func (vzBackend) Available() error {
 
 type vzMachine struct {
 	vm      *vz.VirtualMachine
-	network *vmnet.Network // kept alive with the VM (nil with VZ's NAT)
+	network *vmnet.Network // kept alive with the VM
 	done    chan struct{}
 	once    sync.Once
 }
@@ -140,42 +150,34 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	return m, nil
 }
 
-// vzNetwork returns the guest's network attachment. On macOS 26 and later
-// it is a vmnet shared (NAT) network on a subnet that no host interface
-// uses, with the guest's static address for the kernel command line. VZ's
-// NAT attachment always takes vmnet's default 192.168.64.0/24, and on a
-// host that is itself on that subnet (a Mac VM, such as the GitHub macOS
-// runners) its bridge takes over the host's gateway and DNS; older macOS
-// versions keep it, with a warning in that case.
+// vzNetwork returns the guest's network attachment: a vmnet shared (NAT)
+// network on a subnet that no host interface uses, with the guest's static
+// address for the kernel command line (the API needs macOS 26). VZ's own
+// NAT attachment always takes vmnet's default 192.168.64.0/24, and on a host
+// that is itself on that subnet (a Mac VM, such as the GitHub macOS
+// runners) its bridge takes over the host's gateway and DNS.
 func vzNetwork() (vz.NetworkDeviceAttachment, *vmnet.Network, string, error) {
 	used, err := hostPrefixes()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("host interfaces: %w", err)
 	}
 	subnet, err := freeGuestSubnet(used)
-	var cfg *vmnet.NetworkConfiguration
-	if err == nil {
-		cfg, err = vmnet.NewNetworkConfiguration(vmnet.ModeShared, vmnet.WithIPv4Subnet(subnet))
+	if err != nil {
+		return nil, nil, "", err
 	}
-	var network *vmnet.Network
-	if err == nil {
-		network, err = vmnet.NewNetwork(cfg)
+	cfg, err := vmnet.NewNetworkConfiguration(vmnet.ModeShared, vmnet.WithIPv4Subnet(subnet))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("vmnet network on %s: %w", subnet, err)
 	}
-	var att vz.NetworkDeviceAttachment
-	if err == nil {
-		att, err = vz.NewVMNetNetworkDeviceAttachment(network)
+	network, err := vmnet.NewNetwork(cfg)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("vmnet network on %s: %w", subnet, err)
 	}
-	if err == nil {
-		return att, network, guestNetSpec(subnet), nil
+	att, err := vz.NewVMNetNetworkDeviceAttachment(network)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("vmnet attachment: %w", err)
 	}
-	nat, natErr := vz.NewNATNetworkDeviceAttachment()
-	if natErr != nil {
-		return nil, nil, "", natErr
-	}
-	if def := netip.MustParsePrefix("192.168.64.0/24"); slices.ContainsFunc(used, def.Overlaps) {
-		fmt.Fprintf(os.Stderr, "vz: warning: the host is on %s, the subnet VZ's NAT gives the guest: host networking may break while the VM runs (a vmnet network on another subnet needs macOS 26: %v)\n", def, err)
-	}
-	return nat, nil, "", nil
+	return att, network, guestNetSpec(subnet), nil
 }
 
 func (m *vzMachine) DialAgent(ctx context.Context) (net.Conn, error) {
