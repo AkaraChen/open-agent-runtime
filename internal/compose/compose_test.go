@@ -81,6 +81,43 @@ func TestComposeDeterministicAndCached(t *testing.T) {
 	}
 }
 
+func TestStoreLayersLargestFirst(t *testing.T) {
+	pl := &manifest.PlatformLock{StorePaths: []manifest.StorePath{
+		{Path: "/nix/store/aaa-small", Size: 10},
+		{Path: "/nix/store/bbb-big", Size: 900},
+		{Path: "/nix/store/ccc-mid", Size: 50},
+		{Path: "/nix/store/ddd-mid", Size: 50},
+		{Path: "/nix/store/fff-unsized"},
+		{Path: "/nix/store/eee-unsized"},
+	}}
+	l := Layout{Root: "/cache"}
+	var want []string
+	for _, n := range []string{"bbb-big", "ccc-mid", "ddd-mid", "aaa-small", "eee-unsized", "fff-unsized"} {
+		want = append(want, l.StoreLayer(n))
+	}
+	if got := StoreLayers(l, pl); !reflect.DeepEqual(got, want) {
+		t.Fatalf("store layers\n%v\nwant\n%v", got, want)
+	}
+	if pl.StorePaths[0].Name() != "aaa-small" {
+		t.Fatal("the lock was reordered")
+	}
+	// the bundle template carries the order to the agent
+	pl = lockFor(nil)
+	pl.StorePaths = []manifest.StorePath{
+		{Path: "/nix/store/aaa-git", Key: "sha256:g", Size: 1},
+		{Path: "/nix/store/bbb-node", Key: "sha256:n", Size: 100},
+	}
+	pl.BundleDigest = pl.ComputeDigest()
+	l = warmLayout(t, pl)
+	r, err := Compose(l, pl, "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{l.StoreLayer("bbb-node"), l.StoreLayer("aaa-git")}; !reflect.DeepEqual(r.Bundle.StoreLayers, want) {
+		t.Fatalf("bundle store layers %v, want %v", r.Bundle.StoreLayers, want)
+	}
+}
+
 func TestComposeRejects(t *testing.T) {
 	pl := lockFor(nil)
 	l := warmLayout(t, pl)

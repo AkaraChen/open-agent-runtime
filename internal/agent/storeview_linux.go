@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -50,9 +51,7 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		// started by view.prepare during the warm: let it finish (with
 		// groups.mu held, like a build done here; link jobs do not take it)
 		delete(s.groups.builds, view)
-		for _, layer := range b.StoreLayers {
-			vb.link(layer) // any layer it has not seen arrive
-		}
+		vb.linkAll(b.StoreLayers) // any layer it has not seen arrive
 		vb.mu.Lock()
 		if len(vb.pending) > 0 { // compose checked that all are warm
 			if vb.err == nil {
@@ -87,19 +86,23 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	// store paths are linked in parallel: the cost is one syscall per file
+	// store paths are linked in parallel: the cost is one syscall per file.
+	// PERF: they are handed out in the order of b.StoreLayers, biggest
+	// first (compose.StoreLayers), so that the build ends with small ones
+	// instead of waiting for a big one that was started late.
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
 	var wg sync.WaitGroup
+	linkJobs.Add(int32(len(b.StoreLayers)))
 	for range min(runtime.NumCPU()*2, len(b.StoreLayers)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for layer := range work {
-				name := filepath.Base(layer)
-				err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(tmp, name))
+				err := linkStorePath(layer, tmp)
+				linkJobs.Add(-1)
 				if err != nil {
-					errs <- fmt.Errorf("store view %s: %w", name, err)
+					errs <- err
 				}
 			}
 		}()
@@ -126,6 +129,16 @@ func (s *Server) publishView(tmp, view, done string) error {
 		return err
 	}
 	s.groups.mounted[view] = true
+	return nil
+}
+
+// linkStorePath links the store path in layer into the view being built
+// under tmp. It is a variable so that tests can hold up the link jobs.
+var linkStorePath = func(layer, tmp string) error {
+	name := filepath.Base(layer)
+	if err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(tmp, name)); err != nil {
+		return fmt.Errorf("store view %s: %w", name, err)
+	}
 	return nil
 }
 
@@ -433,8 +446,15 @@ type viewBuild struct {
 // viewLinkers bounds concurrent link jobs across all view builds.
 var viewLinkers = make(chan struct{}, runtime.NumCPU()*2)
 
-// prepareView starts building view for layers unless it exists or is
-// already being built.
+// linkJobs counts the link jobs of view builds that are queued or running:
+// the store paths that builds in progress still have to link. A prepared
+// build that only waits for uploads has none. The writeback loop waits
+// while it is not zero.
+var linkJobs atomic.Int32
+
+// prepareView starts building view for layers (biggest first, as
+// compose.StoreLayers lists them) unless it exists or is already being
+// built.
 func (s *Server) prepareView(layers []string, view string) {
 	if len(layers) == 0 {
 		return
@@ -465,14 +485,10 @@ func (s *Server) prepareView(layers []string, view string) {
 		s.groups.builds = map[string]*viewBuild{}
 	}
 	// registered before looking at the cache: a store path published in
-	// between is linked either by layerReady or by the loop below
+	// between is linked either by layerReady or by linkAll
 	s.groups.builds[view] = vb
 	s.groups.mu.Unlock()
-	for _, l := range layers {
-		if _, err := os.Lstat(l); err == nil {
-			vb.link(l)
-		}
-	}
+	vb.linkAll(layers)
 }
 
 // layerReady links a newly published store path into the views being
@@ -491,32 +507,55 @@ func (s *Server) layerReady(layer string) {
 
 // link links layer into the view in the background if it is still
 // pending and present.
-func (vb *viewBuild) link(layer string) {
+func (vb *viewBuild) link(layer string) { vb.linkAll([]string{layer}) }
+
+// linkAll links those of layers that are still pending and present into
+// the view in the background. The link jobs start in the order of layers.
+//
+// PERF: callers pass the biggest store paths first. One goroutine takes
+// the slots of viewLinkers for the jobs one by one; if every job waited
+// for a slot in a goroutine of its own, they would get them in the order
+// the scheduler runs those goroutines, and a big store path could be left
+// for the end of the build.
+func (vb *viewBuild) linkAll(layers []string) {
+	var jobs []string
 	vb.mu.Lock()
-	if !vb.pending[layer] {
-		vb.mu.Unlock()
+	for _, layer := range layers {
+		if !vb.pending[layer] {
+			continue
+		}
+		if _, err := os.Lstat(layer); err != nil {
+			continue // not uploaded yet
+		}
+		delete(vb.pending, layer)
+		jobs = append(jobs, layer)
+	}
+	vb.inflight += len(jobs)
+	linkJobs.Add(int32(len(jobs)))
+	vb.mu.Unlock()
+	if len(jobs) == 0 {
 		return
 	}
-	if _, err := os.Lstat(layer); err != nil {
-		vb.mu.Unlock()
-		return // not uploaded yet
-	}
-	delete(vb.pending, layer)
-	vb.inflight++
-	vb.mu.Unlock()
 	go func() {
-		viewLinkers <- struct{}{}
-		name := filepath.Base(layer)
-		err := linkTree(filepath.Join(layer, "nix", "store", name), filepath.Join(vb.tmp, name))
-		<-viewLinkers
-		vb.mu.Lock()
-		if err != nil && vb.err == nil {
-			vb.err = fmt.Errorf("store view %s: %w", name, err)
+		for _, layer := range jobs {
+			viewLinkers <- struct{}{}
+			go vb.run(layer)
 		}
-		vb.inflight--
-		vb.finish()
-		vb.mu.Unlock()
 	}()
+}
+
+// run links layer into the view, in a slot of viewLinkers that it frees.
+func (vb *viewBuild) run(layer string) {
+	err := linkStorePath(layer, vb.tmp)
+	<-viewLinkers
+	linkJobs.Add(-1)
+	vb.mu.Lock()
+	if err != nil && vb.err == nil {
+		vb.err = err
+	}
+	vb.inflight--
+	vb.finish()
+	vb.mu.Unlock()
 }
 
 // finish closes done once nothing is pending or in flight (vb.mu held).
@@ -530,12 +569,16 @@ func (vb *viewBuild) finish() {
 // Background writeback during a warm: while uploads keep arriving, the
 // cache filesystem is synced in a loop, so the disk writes the extracted
 // data while later artifacts transfer and extract, and the final flush
-// only has the tail left. It stops once no upload arrived for a while.
+// only has the tail left. It stops once no upload arrived for a while, and
+// it does not sync while a view is being linked.
 var (
 	writebackMu     sync.Mutex
 	writebackActive bool
 	writebackLast   time.Time
 )
+
+// syncfs flushes the filesystem of fd (a variable for tests).
+var syncfs = unix.Syncfs
 
 const writebackIdle = 500 * time.Millisecond
 
@@ -553,8 +596,16 @@ func (s *Server) kickWriteback() {
 			defer f.Close()
 		}
 		for {
-			if err == nil {
-				unix.Syncfs(int(f.Fd()))
+			// PERF: do not start a sync while a view is being linked. A build
+			// is metadata operations only (a link or mkdir per entry), which
+			// wait for the journal commit that a sync forces (see
+			// flushCache): in local runs a build that overlapped this loop
+			// took 29-46% longer (noisy). The loop tries again after its
+			// usual 100 ms, and what it skipped is written by the flush that
+			// ends the warm, which has more to do when builds ran late
+			// (docs/research/perf-round-2-plan.zh-CN.md, C3).
+			if err == nil && linkJobs.Load() == 0 {
+				syncfs(int(f.Fd()))
 			}
 			writebackMu.Lock()
 			if time.Since(writebackLast) > writebackIdle {
