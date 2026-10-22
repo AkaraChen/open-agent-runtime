@@ -73,7 +73,7 @@ func TestDelta(t *testing.T) {
 	}
 }
 
-func result(backend, host string, p50 float64) *Result {
+func hostResult(backend, host string, p50 float64) *Result {
 	m := Metric{Group: "4-start", Key: "e2e", Name: "启动", Unit: "ms", Status: "ok", N: 1, P50: p50, LowerIsBetter: true}
 	return &Result{Backend: backend, Platform: "linux/amd64", Host: host, Metrics: []Metric{m}}
 }
@@ -81,8 +81,8 @@ func result(backend, host string, p50 float64) *Result {
 func TestRenderCPUAware(t *testing.T) {
 	const epyc = "linux/amd64 a · AMD EPYC 7763 64-Core Processor · 4 CPU"
 	const xeon = "linux/amd64 b · Intel(R) Xeon(R) 6973P-C · 4 CPU"
-	results := []*Result{result("kvm", xeon, 50), result("native", epyc, 50)}
-	base := map[string]*Result{"kvm": result("kvm", epyc, 100), "native": result("native", epyc, 100)}
+	results := []*Result{hostResult("kvm", xeon, 50), hostResult("native", epyc, 50)}
+	base := map[string]*Result{"kvm": hostResult("kvm", epyc, 100), "native": hostResult("native", epyc, 100)}
 	out := render("t", "", results, base)
 	if !strings.Contains(out, "| 启动 | ms | 50.0 (-50%，CPU 不同) | 50.0 (🟢-50%) |") {
 		t.Errorf("kvm (other CPU) must be plain text and native (same CPU) keep its verdict:\n%s", out)
@@ -95,7 +95,7 @@ func TestRenderCPUAware(t *testing.T) {
 	}
 
 	// the same CPU everywhere: no note, no marker
-	same := render("t", "", []*Result{result("kvm", epyc, 50)}, map[string]*Result{"kvm": result("kvm", epyc, 100)})
+	same := render("t", "", []*Result{hostResult("kvm", epyc, 50)}, map[string]*Result{"kvm": hostResult("kvm", epyc, 100)})
 	if strings.Contains(same, "CPU 不同") || !strings.Contains(same, "50.0 (🟢-50%)") {
 		t.Errorf("same-CPU comparison must be unchanged:\n%s", same)
 	}
