@@ -63,9 +63,6 @@ func Serve(ctx context.Context, ls []net.Listener, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	// the first info call (the host's readiness probe) would otherwise
-	// exec runc --version, which is slow in emulated guests
-	go s.runcVersion()
 	s.reconcileIngress(ctx)
 	if cfg.Mode == "vm" {
 		markBoot("agentReady")

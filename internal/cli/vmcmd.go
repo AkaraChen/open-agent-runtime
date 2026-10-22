@@ -73,8 +73,12 @@ func vmCmd(g *globalOpts) *cobra.Command {
 					fmt.Printf("  agent unreachable: %v\n", err)
 					return
 				}
+				runc := info.Runc
+				if runc == "" {
+					runc = "runc version pending" // the agent looks it up in the background after it starts
+				}
 				fmt.Printf("  guest: linux/%s kernel %s, mode %s, %s\n  cache: %s, containers: %d\n",
-					info.Arch, info.Kernel, info.Mode, info.Runc, info.Root, info.Containers)
+					info.Arch, info.Kernel, info.Mode, runc, info.Root, info.Containers)
 			})
 			return nil
 		},
@@ -282,7 +286,16 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("launch supervisor: %w", err)
 	}
-	deadline := time.Now().Add(6 * time.Minute)
+	// PERF: poll adaptively. A fixed 100 ms sleep here rounded every "VM cold
+	// boot" timed through the CLI up to a multiple of 100 ms plus the launch
+	// time (the baseline's kvm 409 ms is 4 polls + 9 ms, its native 116 ms is
+	// 1 poll + 16 ms), so those numbers described the poll, not the boot. A
+	// pipe that the supervisor closes when it is ready would avoid polling,
+	// but sudo (native backend) closes inherited file descriptors; reading
+	// state.json works everywhere, and 2 ms steps are cheap for the first
+	// second.
+	waitStart := time.Now()
+	deadline := waitStart.Add(6 * time.Minute)
 	for time.Now().Before(deadline) {
 		st, err := vm.ReadState(dir)
 		if err == nil {
@@ -302,10 +315,25 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(vmPollInterval(time.Since(waitStart))):
 		}
 	}
 	return fmt.Errorf("vm did not become ready\n%s", tail(filepath.Join(dir, "supervisor.log"), 30))
+}
+
+// vmPollInterval is how long startVM waits before it reads the supervisor's
+// state again, given how long it has been waiting: short while a native or
+// warm guest can be ready within milliseconds, longer once the boot drags on
+// (emulated guests take seconds), so that a slow boot does not keep the CLI
+// busy.
+func vmPollInterval(waited time.Duration) time.Duration {
+	switch {
+	case waited < time.Second:
+		return 2 * time.Millisecond
+	case waited < 10*time.Second:
+		return 20 * time.Millisecond
+	}
+	return 100 * time.Millisecond
 }
 
 func supervise(ctx context.Context, dir, owner string, daemonize bool) error {

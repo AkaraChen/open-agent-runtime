@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -57,9 +58,10 @@ type Server struct {
 	groups   storeGroups
 	ing      ingresses
 
-	runcVerOnce sync.Once
-	runcVer     string
-	warmMu      sync.Map // per-key locks for warm.put
+	// runcVer is runc's version line once the lookup New starts in the
+	// background has finished; nil until then
+	runcVer atomic.Pointer[string]
+	warmMu  sync.Map // per-key locks for warm.put
 	// private gives Root private propagation before the first mount
 	// below it (see makePrivate); privateBind is set when that
 	// bind-mounted Root onto itself
@@ -76,6 +78,17 @@ func New(cfg Config) (*Server, error) {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
 	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
+	// PERF: look runc's version up in the background. The host's readiness
+	// probe is the first info call, and info used to wait for this exec. In
+	// an emulated or nested guest, exec'ing the 10 MiB static runc takes
+	// 100-200 ms, which is what the step 13 baseline measured as the "agent
+	// listening -> host connected" delay: vz 114 ms, qemu/TCG 187 ms (kvm,
+	// where the exec is fast: 2.75 ms). Now info reports the version once it
+	// is known and an empty string until then.
+	go func() {
+		v := cfg.Runc.Version()
+		s.runcVer.Store(&v)
+	}()
 	// a fresh version after a restart, so a waiting host never mistakes
 	// the new list for the one it already has
 	s.ing.ver = uint64(s.booted.UnixNano())
@@ -103,11 +116,14 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// runcVersion is computed once: exec'ing runc on every info call costs
-// tens of milliseconds in slow guests, and every CLI command calls info.
+// runcVersion is runc's version line, or "" while the lookup New started is
+// still running. It is looked up once: exec'ing runc on every info call would
+// cost tens of milliseconds in slow guests, and every CLI command calls info.
 func (s *Server) runcVersion() string {
-	s.runcVerOnce.Do(func() { s.runcVer = s.cfg.Runc.Version() })
-	return s.runcVer
+	if v := s.runcVer.Load(); v != nil {
+		return *v
+	}
+	return ""
 }
 
 // Handle dispatches a request and logs failures to the agent's stderr

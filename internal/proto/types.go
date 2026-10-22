@@ -14,7 +14,7 @@ type InfoResult struct {
 	Kernel       string `json:"kernel"`
 	Root         string `json:"root"`
 	Mode         string `json:"mode"` // vm or native
-	Runc         string `json:"runc"`
+	Runc         string `json:"runc"` // empty until the agent's background lookup of the version finishes
 	BootedAt     string `json:"bootedAt,omitempty"`
 	Containers   int    `json:"containers"`
 }
