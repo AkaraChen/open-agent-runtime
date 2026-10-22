@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -875,7 +876,7 @@ func (s *Server) takePrepared(ctx context.Context, name, digest string) *instanc
 			continue
 		}
 		if in.BundleDigest == digest && found == nil {
-			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
+			if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
 				found = in
 				continue
 			}
@@ -973,9 +974,22 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	var last error
+	var logs logSearch
+	defer logs.close()
 	for {
+		// PERF: the tcp and log probes cost microseconds (a dial to a port
+		// nobody listens on yet, the bytes the log gained), and so does the
+		// liveness check below, which reads runc's state files. They run
+		// every millisecond to begin with, so readiness is noticed within a
+		// millisecond of the application being ready. Each round used to be
+		// a `runc state` exec (4.6 ms on KVM, 100 ms on vz, 250 ms on TCG)
+		// plus a 10 ms sleep, which made readiness come in steps of 14.6 ms
+		// on KVM. The exec probe runs a process in the container each time
+		// and keeps its 10 ms.
+		pause := pollPause(time.Since(start))
 		switch {
 		case r.TCP != "":
 			c, err := net.DialTimeout("tcp", r.TCP, 200*time.Millisecond)
@@ -985,14 +999,17 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 			}
 			last = err
 		case len(r.Exec) > 0:
+			pause = 10 * time.Millisecond
 			code, _, stderr, err := s.cfg.Runc.Exec(ctx, in.ID, nil, r.Exec)
 			if err == nil && code == 0 {
 				return nil
 			}
 			last = fmt.Errorf("exit %d: %v %s", code, err, strings.TrimSpace(stderr))
 		case r.Log != "":
-			b, err := os.ReadFile(filepath.Join(in.dir, "console.log"))
-			if err == nil && strings.Contains(string(b), r.Log) {
+			if logs.needle == nil {
+				logs.path, logs.needle = filepath.Join(in.dir, "console.log"), []byte(r.Log)
+			}
+			if logs.found() {
 				return nil
 			}
 			last = fmt.Errorf("%q not in output yet", r.Log)
@@ -1006,8 +1023,65 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(pause):
 		}
+	}
+}
+
+// pollPause is the pause between two rounds of a cheap readiness probe, given
+// how long the application has been starting: a millisecond for the first 50
+// ms, where a late answer is a large share of the wait, then 2% of the time
+// waited so far, up to the 10 ms that rounds used to have. A round costs
+// about 100 to 200 microseconds of CPU, so polling every millisecond for as
+// long as a slow application takes would use a fifth of a core per waiting
+// container, which matters when many start at once on a couple of vCPUs.
+func pollPause(waited time.Duration) time.Duration {
+	return min(max(waited/50, time.Millisecond), 10*time.Millisecond)
+}
+
+// logSearch looks for a string in a log that grows. Every call continues
+// where the previous one stopped, so polling it every millisecond reads each
+// byte of the log once instead of the whole log every time.
+type logSearch struct {
+	path   string
+	needle []byte
+	f      *os.File
+	off    int64  // bytes read so far
+	carry  []byte // the last len(needle)-1 of them: a match may straddle two reads
+	buf    []byte
+}
+
+// found reports whether the string is in the log so far.
+func (l *logSearch) found() bool {
+	if l.f == nil {
+		f, err := os.Open(l.path)
+		if err != nil {
+			return false
+		}
+		l.f = f
+		l.buf = make([]byte, max(32<<10, 2*len(l.needle)))
+	}
+	for {
+		n := copy(l.buf, l.carry)
+		m, err := l.f.ReadAt(l.buf[n:], l.off)
+		if m == 0 {
+			return false // nothing new yet
+		}
+		l.off += int64(m)
+		data := l.buf[:n+m]
+		if bytes.Contains(data, l.needle) {
+			return true
+		}
+		l.carry = append(l.carry[:0], data[max(0, len(data)-len(l.needle)+1):]...)
+		if err != nil {
+			return false // the end of the log for now
+		}
+	}
+}
+
+func (l *logSearch) close() {
+	if l.f != nil {
+		l.f.Close()
 	}
 }
 
@@ -1098,9 +1172,15 @@ func (s *Server) destroy(ctx context.Context, in *instance, force bool) error {
 	return os.RemoveAll(in.dir)
 }
 
+// observe reports an instance as it is right now.
+//
+// PERF: the status comes from runc's state files (Runc.FastState), not from
+// a `runc state` exec: observe ends every run and reload and backs list,
+// state and the readiness poll, and an exec costs 4.6 ms on KVM, 100 ms on
+// vz and 250 ms on TCG.
 func (s *Server) observe(ctx context.Context, in *instance) proto.Container {
 	c := proto.Container{Name: in.Name, ID: in.ID, BundleDigest: in.BundleDigest, Created: in.Created, Bundle: in.dir, Status: "unknown"}
-	if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil {
+	if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil {
 		c.Status, c.Pid = st.Status, st.Pid
 		if st.Status == "stopped" {
 			c.Pid = 0

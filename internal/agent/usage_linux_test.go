@@ -55,7 +55,7 @@ func TestReadUsageCountsChildren(t *testing.T) {
 // fakeRunc returns a Runc whose binary is a script: `state` prints the
 // contents of state.json next to it, `--version` a version line, and
 // everything else succeeds silently.
-func fakeRunc(t *testing.T, state string) *Runc {
+func fakeRuncScript(t *testing.T, state string) *Runc {
 	t.Helper()
 	dir := t.TempDir()
 	script := filepath.Join(dir, "runc")
@@ -81,7 +81,7 @@ done
 // checks that it counts exactly one exec: a missed path would hide runc
 // processes from the benchmarks, a double count would inflate them.
 func TestRuncExecsCountsEveryCommand(t *testing.T) {
-	r := fakeRunc(t, `{"id":"c","pid":42,"status":"stopped"}`)
+	r := fakeRuncScript(t, `{"id":"c","pid":42,"status":"stopped"}`)
 	ctx := context.Background()
 	log := filepath.Join(t.TempDir(), "console.log")
 	for _, tc := range []struct {
@@ -138,7 +138,7 @@ func TestRuncExecsCountsEveryCommand(t *testing.T) {
 }
 
 func TestWithUsage(t *testing.T) {
-	r := fakeRunc(t, `{"id":"c","pid":42,"status":"running"}`)
+	r := fakeRuncScript(t, `{"id":"c","pid":42,"status":"running"}`)
 	ctx := context.Background()
 	res, err := withUsage(func() (*proto.RunResult, error) {
 		if _, err := r.State(ctx, "c"); err != nil {
