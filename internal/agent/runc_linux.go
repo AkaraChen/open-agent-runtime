@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -28,7 +29,15 @@ type runcState struct {
 	Bundle string `json:"bundle"`
 }
 
+// runcExecs counts the runc processes the agent has started, readiness
+// probes (`runc exec`) and state polls included. Every runc command is built
+// here and run right away, so this is the one place that counts them;
+// Version, which runs runc without --root, counts itself. The per-request
+// share goes into proto.Timings (see usage).
+var runcExecs atomic.Int64
+
 func (r *Runc) cmd(ctx context.Context, args ...string) *exec.Cmd {
+	runcExecs.Add(1)
 	return exec.CommandContext(ctx, r.Binary, append([]string{"--root", r.Root}, args...)...)
 }
 
@@ -223,6 +232,7 @@ func (r *Runc) WaitStopped(ctx context.Context, id string, timeout time.Duration
 
 // Version returns runc's version line.
 func (r *Runc) Version() string {
+	runcExecs.Add(1)
 	out, err := exec.Command(r.Binary, "--version").Output()
 	if err != nil {
 		return "unavailable: " + err.Error()

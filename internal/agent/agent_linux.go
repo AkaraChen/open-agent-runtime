@@ -208,7 +208,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		start := time.Now()
+		start, before := time.Now(), readUsage()
 		res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
 		if err != nil {
 			return nil, err
@@ -221,14 +221,15 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if a.Flush {
 			s.flushCache()
 		}
+		used := readUsage().since(before)
 		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers,
-			View: tFlush.Sub(tView), Flush: time.Since(tFlush)}, nil
+			View: tFlush.Sub(tView), Flush: time.Since(tFlush), CPUUser: used.user, CPUSys: used.sys}, nil
 	case proto.OpRun, proto.OpReload:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.run(ctx, a, req.Op == proto.OpReload)
+		return withUsage(func() (*proto.RunResult, error) { return s.run(ctx, a, req.Op == proto.OpReload) })
 	case proto.OpDial:
 		var a proto.DialArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -246,7 +247,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.prepare(ctx, a)
+		return withUsage(func() (*proto.RunResult, error) { return s.prepare(ctx, a) })
 	case proto.OpStop:
 		var a proto.NameArgs
 		if err := proto.Decode(req, &a); err != nil {

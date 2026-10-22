@@ -140,6 +140,10 @@ type ComposeResult struct {
 	// view and writing the cache back (warm precompose).
 	View  time.Duration `json:"view,omitempty"`
 	Flush time.Duration `json:"flush,omitempty"`
+	// CPUUser and CPUSys are the CPU time of the agent process and its
+	// reaped children over the request (process-wide, see Timings).
+	CPUUser time.Duration `json:"cpuUser,omitempty"`
+	CPUSys  time.Duration `json:"cpuSys,omitempty"`
 }
 
 // Reload strategies.
@@ -185,6 +189,16 @@ type Timings struct {
 	// Downtime is the window with no running instance (replace strategy).
 	Downtime time.Duration `json:"downtime,omitempty"`
 	Total    time.Duration `json:"total"`
+
+	// Resource use of the agent process over the request: runc processes
+	// it started, CPU time and page faults of the agent and its reaped
+	// children. Unlike the durations above these are process-wide, so
+	// concurrent requests share them.
+	RuncExecs   int           `json:"runcExecs,omitempty"`
+	CPUUser     time.Duration `json:"cpuUser,omitempty"`
+	CPUSys      time.Duration `json:"cpuSys,omitempty"`
+	MinorFaults int64         `json:"minorFaults,omitempty"`
+	MajorFaults int64         `json:"majorFaults,omitempty"`
 }
 
 // RunResult describes a started container.
