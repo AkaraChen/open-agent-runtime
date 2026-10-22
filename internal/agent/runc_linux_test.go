@@ -689,7 +689,16 @@ func TestStopWithoutRunc(t *testing.T) {
 			t.Fatalf("%s: killed by %v, want %v", tc.name, sig, want)
 		}
 	}
-	if got := execs(t, calls); len(got) != 0 {
+	// New looks runc's version up in the background (one `runc --version`);
+	// nothing on the stop path may run runc
+	var got []string
+	for _, c := range execs(t, calls) {
+		if c == "--version" {
+			continue
+		}
+		got = append(got, c)
+	}
+	if len(got) != 0 {
 		t.Fatalf("runc was run: %q", got)
 	}
 }

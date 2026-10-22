@@ -131,8 +131,14 @@ func TestRuncExecsCountsEveryCommand(t *testing.T) {
 		if err := tc.call(); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if got := runcExecs.Load() - before; got != 1 {
-			t.Errorf("%s counted %d runc execs, want 1", tc.name, got)
+		want := int64(1)
+		if tc.name == "wait stopped" {
+			// answered from runc's state files (no state.json: the
+			// container is gone), so no runc exec
+			want = 0
+		}
+		if got := runcExecs.Load() - before; got != want {
+			t.Errorf("%s counted %d runc execs, want %d", tc.name, got, want)
 		}
 	}
 }
