@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Runc wraps the runc command line.
@@ -367,10 +369,117 @@ func warnOnce(key, format string, args ...any) {
 	}
 }
 
+// errInitGone reports that a container's init process no longer exists, or
+// that its pid belongs to another process by now.
+var errInitGone = errors.New("container init process is gone")
+
+// pidfdOpen is unix.PidfdOpen (Linux 5.3); tests replace it to play a kernel
+// without pidfds.
+var pidfdOpen = unix.PidfdOpen
+
+// killSignals are the signals Kill sends itself, by the names `runc kill`
+// takes. Others are left to runc.
+var killSignals = map[string]unix.Signal{"TERM": unix.SIGTERM, "KILL": unix.SIGKILL}
+
 // Kill sends a signal to the container init.
+//
+// PERF: the init process is signalled through a pidfd, not by exec'ing `runc
+// kill` (see StateFile for what an exec costs). Without --all, `runc kill`
+// signals the init process only, too, and a container has its own PID
+// namespace: when its init dies the kernel kills the rest of the container,
+// so signalling the init is the same. The pidfd also settles what runc's
+// pid and start time check leaves open: it refers to the process that was
+// checked, even if its pid is reused before the signal is sent.
+//
+// Whatever the pidfd path cannot do (a kernel without pidfd_open, a
+// state.json it cannot read, a signal other than TERM and KILL) is left to
+// `runc kill`.
 func (r *Runc) Kill(ctx context.Context, id, sig string) error {
+	if s, ok := killSignals[sig]; ok {
+		err := r.signalInit(id, s)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, errInitGone):
+			// what `runc kill` says about a container that is not running
+			return errors.New("runc kill: container not running")
+		case !errors.Is(err, fs.ErrNotExist): // a container runc does not know gets runc's error
+			warnOnce("pidfd", "cannot signal a container through a pidfd (%v); asking \"runc kill\" instead", err)
+		}
+	}
 	_, err := r.run(ctx, "kill", id, sig)
 	return err
+}
+
+// signalInit sends a signal to the container's init process through a pidfd.
+func (r *Runc) signalInit(id string, sig unix.Signal) error {
+	fd, err := r.openInit(id)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if err := unix.PidfdSendSignal(fd, sig, nil, 0); err != nil {
+		if err == unix.ESRCH {
+			return errInitGone
+		}
+		return fmt.Errorf("pidfd_send_signal: %w", err)
+	}
+	return nil
+}
+
+// openInit returns a pidfd for the container's init process. The pidfd is
+// opened first and the process then checked against the start time that
+// libcontainer recorded, so the pidfd cannot be that of a process that
+// merely inherited the pid. errInitGone means the process is gone; a
+// container runc does not know satisfies errors.Is(err, fs.ErrNotExist).
+func (r *Runc) openInit(id string) (int, error) {
+	ip, err := r.readInit(id)
+	if err != nil {
+		return -1, err
+	}
+	fd, err := pidfdOpen(ip.pid, 0)
+	if err != nil {
+		if err == unix.ESRCH {
+			return -1, errInitGone
+		}
+		return -1, fmt.Errorf("pidfd_open(%d): %w", ip.pid, err)
+	}
+	alive, err := ip.alive()
+	if err != nil || !alive {
+		unix.Close(fd)
+		if err == nil {
+			err = errInitGone
+		}
+		return -1, err
+	}
+	return fd, nil
+}
+
+// pollExit waits until the process behind a pidfd has terminated (the pidfd
+// is then readable), the deadline passes or ctx is done.
+func pollExit(ctx context.Context, pidfd int, deadline time.Time) (exited bool, err error) {
+	fds := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
+	for {
+		// wait in slices: poll(2) does not know about ctx
+		wait := min(time.Until(deadline), 100*time.Millisecond)
+		ms := 0
+		if wait > 0 {
+			ms = int((wait + time.Millisecond - 1) / time.Millisecond)
+		}
+		n, err := unix.Poll(fds, ms)
+		if err != nil && err != unix.EINTR {
+			return false, fmt.Errorf("poll pidfd: %w", err)
+		}
+		if n > 0 {
+			if fds[0].Revents&unix.POLLIN == 0 {
+				return false, fmt.Errorf("poll pidfd: events %#x", fds[0].Revents)
+			}
+			return true, nil
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return false, nil
+		}
+	}
 }
 
 // Delete removes the container.
@@ -409,12 +518,30 @@ func (r *Runc) Exec(ctx context.Context, id string, env, args []string) (int, st
 	return code, stdout.String(), stderr.String(), nil
 }
 
-// WaitStopped polls until the container is stopped or the timeout expires.
+// WaitStopped waits until the container is stopped or the timeout expires.
 func (r *Runc) WaitStopped(ctx context.Context, id string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	// PERF: poll(2) on a pidfd of the init process returns the moment the
+	// process has terminated: no polling interval, no runc exec. For a
+	// container init, termination means the kernel has already killed every
+	// other process in the container's PID namespace: the pidfd only becomes
+	// readable after that.
+	switch fd, err := r.openInit(id); {
+	case err == nil:
+		exited, err := pollExit(ctx, fd, deadline)
+		unix.Close(fd)
+		if err == nil {
+			return exited
+		}
+		warnOnce("pidfd", "cannot wait for a container through a pidfd (%v); polling its state instead", err)
+	case errors.Is(err, errInitGone), errors.Is(err, fs.ErrNotExist):
+		return true // stopped, or not known to runc any more
+	default:
+		warnOnce("pidfd", "cannot wait for a container through a pidfd (%v); polling its state instead", err)
+	}
 	for {
-		// PERF: look at the state files (see StateFile); only a container
-		// whose files cannot be read costs a `runc state` per poll
+		// without a pidfd: look at the state files (see StateFile); only a
+		// container whose files cannot be read costs a `runc state` per poll
 		pause := 2 * time.Millisecond
 		st, err := r.StateFile(id)
 		if err != nil {

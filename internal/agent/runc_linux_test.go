@@ -5,15 +5,22 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/AkaraChen/open-agent-runtime/internal/proto"
 )
 
 // The test binary doubles as the process of a container: started with
@@ -297,7 +304,39 @@ func TestFastState(t *testing.T) {
 	}
 }
 
-func TestWaitStoppedPolls(t *testing.T) {
+// noPidfd makes the kernel look as if it had no pidfd_open (before Linux 5.3).
+func noPidfd(t *testing.T) {
+	t.Helper()
+	old := pidfdOpen
+	pidfdOpen = func(int, int) (int, error) { return -1, unix.ENOSYS }
+	t.Cleanup(func() { pidfdOpen = old })
+}
+
+// countPidfdOpens counts the pidfds opened for the rest of the test.
+func countPidfdOpens(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	old := pidfdOpen
+	pidfdOpen = func(pid, flags int) (int, error) { n.Add(1); return old(pid, flags) }
+	t.Cleanup(func() { pidfdOpen = old })
+	return &n
+}
+
+func TestWaitStopped(t *testing.T) {
+	t.Run("pidfd", func(t *testing.T) {
+		opens := countPidfdOpens(t)
+		testWaitStopped(t)
+		if opens.Load() == 0 {
+			t.Fatal("the wait did not use a pidfd")
+		}
+	})
+	t.Run("polling", func(t *testing.T) {
+		noPidfd(t)
+		testWaitStopped(t)
+	})
+}
+
+func testWaitStopped(t *testing.T) {
 	root := t.TempDir()
 	bin, calls := fakeRunc(t)
 	r := Runc{Binary: bin, Root: root}
@@ -369,6 +408,289 @@ func TestObserve(t *testing.T) {
 	}
 	if got := execs(t, calls); len(got) != 0 {
 		t.Fatalf("observe ran runc: %q", got)
+	}
+}
+
+// register records a started process as the init of container id.
+func register(t *testing.T, root, id string, child *exec.Cmd) {
+	t.Helper()
+	_, start, err := procStat(child.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeState(t, root, id, child.Process.Pid, start)
+}
+
+// diedOf returns the signal a reaped process was killed by.
+func diedOf(t *testing.T, child *exec.Cmd) syscall.Signal {
+	t.Helper()
+	child.Wait()
+	ws, ok := child.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		t.Fatalf("the process was not killed by a signal: %v", child.ProcessState)
+	}
+	return ws.Signal()
+}
+
+func TestKill(t *testing.T) {
+	root := t.TempDir()
+	bin, calls := fakeRunc(t)
+	r := Runc{Binary: bin, Root: root}
+	ctx := context.Background()
+
+	t.Run("TERM", func(t *testing.T) {
+		child := startProcess(t, "sleep")
+		register(t, root, "term", child)
+		if err := r.Kill(ctx, "term", "TERM"); err != nil {
+			t.Fatal(err)
+		}
+		if !r.WaitStopped(ctx, "term", 10*time.Second) {
+			t.Fatal("the container did not stop")
+		}
+		if st, err := r.StateFile("term"); err != nil || st.Status != "stopped" {
+			t.Fatalf("got %+v %v", st, err)
+		}
+		if sig := diedOf(t, child); sig != syscall.SIGTERM {
+			t.Fatalf("killed by %v, want SIGTERM", sig)
+		}
+	})
+
+	t.Run("TERM is ignored, KILL is not", func(t *testing.T) {
+		child := startProcess(t, "ignore-term")
+		register(t, root, "stubborn", child)
+		if err := r.Kill(ctx, "stubborn", "TERM"); err != nil {
+			t.Fatal(err)
+		}
+		if r.WaitStopped(ctx, "stubborn", 150*time.Millisecond) {
+			t.Fatal("the container stopped although it ignores SIGTERM")
+		}
+		if err := r.Kill(ctx, "stubborn", "KILL"); err != nil {
+			t.Fatal(err)
+		}
+		if !r.WaitStopped(ctx, "stubborn", 10*time.Second) {
+			t.Fatal("the container did not stop")
+		}
+		if sig := diedOf(t, child); sig != syscall.SIGKILL {
+			t.Fatalf("killed by %v, want SIGKILL", sig)
+		}
+	})
+
+	t.Run("not running", func(t *testing.T) {
+		child := startProcess(t, "sleep")
+		register(t, root, "gone", child)
+		child.Process.Kill()
+		waitState(t, child.Process.Pid, 'Z') // not reaped yet
+		for _, sig := range []string{"TERM", "KILL"} {
+			if err := r.Kill(ctx, "gone", sig); err == nil || !strings.Contains(err.Error(), "not running") {
+				t.Fatalf("zombie, %s: got %v, want a \"not running\" error", sig, err)
+			}
+		}
+		child.Wait()
+		if err := r.Kill(ctx, "gone", "TERM"); err == nil || !strings.Contains(err.Error(), "not running") {
+			t.Fatalf("reaped: got %v, want a \"not running\" error", err)
+		}
+	})
+
+	t.Run("the pid was reused", func(t *testing.T) {
+		// state.json names a process that started at another time: never
+		// signal what happens to have that pid now
+		child := startProcess(t, "sleep")
+		_, start, _ := procStat(child.Process.Pid)
+		writeState(t, root, "reused", child.Process.Pid, start+1)
+		if err := r.Kill(ctx, "reused", "KILL"); err == nil || !strings.Contains(err.Error(), "not running") {
+			t.Fatalf("got %v, want a \"not running\" error", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+			t.Fatalf("the unrelated process was signalled: %v", err)
+		}
+		if state, _, _ := procStat(child.Process.Pid); state == 'Z' {
+			t.Fatal("the unrelated process was killed")
+		}
+	})
+
+	if got := execs(t, calls); len(got) != 0 {
+		t.Fatalf("runc was run: %q", got)
+	}
+
+	// what the pidfd path does not handle is left to runc
+	t.Run("left to runc", func(t *testing.T) {
+		child := startProcess(t, "sleep")
+		register(t, root, "web", child)
+		if err := r.Kill(ctx, "web", "HUP"); err != nil { // another signal
+			t.Fatal(err)
+		}
+		if err := r.Kill(ctx, "nosuch", "TERM"); err != nil { // a container runc does not know
+			t.Fatal(err)
+		}
+		want := []string{"--root " + root + " kill web HUP", "--root " + root + " kill nosuch TERM"}
+		if got := execs(t, calls); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("runc calls: got %q, want %q", got, want)
+		}
+		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+			t.Fatalf("the process is gone: %v", err)
+		}
+	})
+}
+
+func TestKillWithoutPidfd(t *testing.T) {
+	noPidfd(t)
+	root := t.TempDir()
+	bin, calls := fakeRunc(t)
+	r := Runc{Binary: bin, Root: root}
+	ctx := context.Background()
+	child := startProcess(t, "sleep")
+	register(t, root, "c1", child)
+
+	// the signal is runc's to send
+	if err := r.Kill(ctx, "c1", "TERM"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := execs(t, calls), "--root "+root+" kill c1 TERM"; len(got) != 1 || got[0] != want {
+		t.Fatalf("runc calls: got %q, want %q", got, want)
+	}
+
+	// the wait polls the state files and does not run runc
+	go func() { time.Sleep(30 * time.Millisecond); child.Process.Kill() }()
+	if !r.WaitStopped(ctx, "c1", 10*time.Second) {
+		t.Fatal("the container did not stop")
+	}
+	if got := execs(t, calls); len(got) != 1 {
+		t.Fatalf("runc calls: %q", got)
+	}
+}
+
+func TestOpenInit(t *testing.T) {
+	root := t.TempDir()
+	r := Runc{Root: root}
+	child := startProcess(t, "sleep")
+	register(t, root, "c1", child)
+	_, start, _ := procStat(child.Process.Pid)
+	writeState(t, root, "reused", child.Process.Pid, start+1)
+
+	openFDs := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(entries)
+	}
+	before := openFDs()
+	for range 50 {
+		fd, err := r.openInit("c1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		unix.Close(fd)
+		if _, err := r.openInit("reused"); !errors.Is(err, errInitGone) {
+			t.Fatalf("pid reuse: got %v, want errInitGone", err)
+		}
+		if _, err := r.openInit("nosuch"); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("unknown container: got %v, want not-exist", err)
+		}
+	}
+	if after := openFDs(); after != before {
+		t.Fatalf("%d file descriptors leaked", after-before)
+	}
+
+	// a process that is gone
+	child.Process.Kill()
+	child.Wait()
+	if _, err := r.openInit("c1"); !errors.Is(err, errInitGone) {
+		t.Fatalf("got %v, want errInitGone", err)
+	}
+}
+
+func TestPollExit(t *testing.T) {
+	child := startProcess(t, "sleep")
+	fd, err := unix.PidfdOpen(child.Process.Pid, 0)
+	if err != nil {
+		t.Skipf("no pidfd: %v", err)
+	}
+	defer unix.Close(fd)
+	ctx := context.Background()
+
+	// alive: the deadline ends the wait
+	t0 := time.Now()
+	if exited, err := pollExit(ctx, fd, time.Now().Add(50*time.Millisecond)); exited || err != nil {
+		t.Fatalf("got %v %v", exited, err)
+	}
+	if d := time.Since(t0); d < 50*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("waited %s for 50ms", d)
+	}
+
+	// a cancelled ctx ends the wait within a slice, not at the deadline
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	t0 = time.Now()
+	if exited, err := pollExit(cctx, fd, time.Now().Add(time.Minute)); exited || err != nil {
+		t.Fatalf("got %v %v", exited, err)
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("a cancelled wait took %s", d)
+	}
+
+	// exits while waiting
+	go func() { time.Sleep(30 * time.Millisecond); child.Process.Kill() }()
+	if exited, err := pollExit(ctx, fd, time.Now().Add(10*time.Second)); !exited || err != nil {
+		t.Fatalf("got %v %v", exited, err)
+	}
+	// and has exited: even a deadline in the past sees it
+	if exited, err := pollExit(ctx, fd, time.Now().Add(-time.Second)); !exited || err != nil {
+		t.Fatalf("got %v %v", exited, err)
+	}
+}
+
+// Stopping a container touches runc only to delete it: the signals and the
+// waits go to the init process (for the instance a reload retires, and for
+// the stop command).
+func TestStopWithoutRunc(t *testing.T) {
+	dir := t.TempDir()
+	bin, calls := fakeRunc(t)
+	s, err := New(Config{Root: dir, Mode: "native", Runc: Runc{Binary: bin, Root: filepath.Join(dir, "runc")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, mode string
+		slow       bool // ignores SIGTERM: stopped by SIGKILL after the grace period
+		grace      time.Duration
+	}{
+		{"obedient", "sleep", false, time.Minute},
+		{"stubborn", "ignore-term", true, 300 * time.Millisecond},
+	} {
+		child := startProcess(t, tc.mode)
+		id := tc.name + "-1"
+		in := &instance{Name: tc.name, ID: id, dir: s.instDir(id), Created: time.Now()}
+		if err := os.MkdirAll(in.dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := in.save(); err != nil {
+			t.Fatal(err)
+		}
+		register(t, s.cfg.Runc.Root, id, child)
+
+		t0 := time.Now()
+		c, err := s.stop(ctx, proto.NameArgs{Name: tc.name, Timeout: tc.grace})
+		if err != nil || c.Status != "stopped" || c.Pid != 0 {
+			t.Fatalf("%s: got %+v %v", tc.name, c, err)
+		}
+		// a container that obeys SIGTERM is stopped long before the grace
+		// period ends, one that ignores it only by SIGKILL after it
+		if d := time.Since(t0); tc.slow && d < tc.grace || !tc.slow && d >= tc.grace {
+			t.Fatalf("%s: stopped after %s with a grace period of %s", tc.name, d, tc.grace)
+		}
+		want := syscall.SIGTERM
+		if tc.slow {
+			want = syscall.SIGKILL
+		}
+		if sig := diedOf(t, child); sig != want {
+			t.Fatalf("%s: killed by %v, want %v", tc.name, sig, want)
+		}
+	}
+	if got := execs(t, calls); len(got) != 0 {
+		t.Fatalf("runc was run: %q", got)
 	}
 }
 
