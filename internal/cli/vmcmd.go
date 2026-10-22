@@ -72,8 +72,12 @@ func vmCmd(g *globalOpts) *cobra.Command {
 					fmt.Printf("  agent unreachable: %v\n", err)
 					return
 				}
+				runc := info.Runc
+				if runc == "" {
+					runc = "runc version pending" // the agent looks it up in the background after it starts
+				}
 				fmt.Printf("  guest: linux/%s kernel %s, mode %s, %s\n  cache: %s, containers: %d\n",
-					info.Arch, info.Kernel, info.Mode, info.Runc, info.Root, info.Containers)
+					info.Arch, info.Kernel, info.Mode, runc, info.Root, info.Containers)
 			})
 			return nil
 		},

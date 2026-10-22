@@ -282,6 +282,19 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 			ready, listening = nil, true
 			continue
 		}
+		// PERF: a probe that fails (refused or reset before the agent
+		// listens) returns at once, so this pause is what separates the
+		// agent starting to listen from the host noticing. At 20 ms that was
+		// up to 20 ms, 10 ms on average, in the boot.detect metric. 2 ms
+		// while a guest can still be ready soon (kvm boots in about 400 ms);
+		// emulated and nested guests take seconds, and each probe that
+		// reaches one costs it an interrupt, so after the first second they
+		// are probed less often. A connect that hangs is bounded by the
+		// attempt timeout instead.
+		pause := 2 * time.Millisecond
+		if time.Since(st.Started) > time.Second {
+			pause = 10 * time.Millisecond
+		}
 		select {
 		case <-m.Done():
 			if e, ok := m.(interface{ ExitErr() error }); ok && e.ExitErr() != nil {
@@ -291,7 +304,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		case <-ctx.Done():
 			m.Kill()
 			return fail(ctx.Err())
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(pause):
 		}
 		if time.Now().After(deadline) {
 			m.Kill()
@@ -303,7 +316,11 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		st.Phases[phase] = at
 	}
 	st.Phases["agentReachable"] = st.Boot
-	fmt.Fprintf(log, "guest ready in %s: kernel %s, %s\n", st.Boot.Round(time.Millisecond), info.Kernel, info.Runc)
+	msg := fmt.Sprintf("guest ready in %s: kernel %s", st.Boot.Round(time.Millisecond), info.Kernel)
+	if info.Runc != "" { // the agent looks it up in the background; vm status shows it later
+		msg += ", " + info.Runc
+	}
+	fmt.Fprintln(log, msg)
 
 	os.Remove(st.Socket)
 	l, err := net.Listen("unix", st.Socket)
