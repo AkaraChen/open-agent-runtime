@@ -851,7 +851,7 @@ func (s *Server) takePrepared(ctx context.Context, name, digest string) *instanc
 			continue
 		}
 		if in.BundleDigest == digest && found == nil {
-			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
+			if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
 				found = in
 				continue
 			}
@@ -1074,9 +1074,15 @@ func (s *Server) destroy(ctx context.Context, in *instance, force bool) error {
 	return os.RemoveAll(in.dir)
 }
 
+// observe reports an instance as it is right now.
+//
+// PERF: the status comes from runc's state files (Runc.FastState), not from
+// a `runc state` exec: observe ends every run and reload and backs list,
+// state and the readiness poll, and an exec costs 4.6 ms on KVM, 100 ms on
+// vz and 250 ms on TCG.
 func (s *Server) observe(ctx context.Context, in *instance) proto.Container {
 	c := proto.Container{Name: in.Name, ID: in.ID, BundleDigest: in.BundleDigest, Created: in.Created, Bundle: in.dir, Status: "unknown"}
-	if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil {
+	if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil {
 		c.Status, c.Pid = st.Status, st.Pid
 		if st.Status == "stopped" {
 			c.Pid = 0
