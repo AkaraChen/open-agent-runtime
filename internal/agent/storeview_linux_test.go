@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/compose"
 )
@@ -79,15 +82,22 @@ func fakeBundle(t testing.TB, s *Server, id string, n int) *compose.Bundle {
 	return b
 }
 
-func rootServer(t testing.TB) *Server {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
+// plainServer is a Server on a temporary root, for tests that do not need
+// root.
+func plainServer(t testing.TB) *Server {
 	dir := t.TempDir()
 	s, err := New(Config{Root: dir, Mode: "native", Runc: Runc{Root: dir + "/runc"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
+
+func rootServer(t testing.TB) *Server {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	s := plainServer(t)
 	t.Cleanup(func() { s.StopAll(context.Background()) })
 	return s
 }
@@ -201,6 +211,160 @@ func TestPrepareView(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(b2.StoreView); len(entries) != 5 {
 		t.Fatalf("%d store paths in the second view, want 5", len(entries))
+	}
+}
+
+// waitFor polls ok for up to five seconds.
+func waitFor(t testing.TB, what string, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(2 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// holdLinks makes link jobs wait for release, after sending the name of
+// their store path on started.
+func holdLinks(t testing.TB) (started <-chan string, release func()) {
+	hold := make(chan struct{})
+	ch := make(chan string, 1024)
+	orig := linkStorePath
+	linkStorePath = func(layer, tmp string) error {
+		ch <- filepath.Base(layer)
+		<-hold
+		return orig(layer, tmp)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { close(hold) }) }
+	t.Cleanup(func() {
+		release()
+		// jobs that are still running read linkStorePath
+		for deadline := time.Now().Add(5 * time.Second); linkJobs.Load() != 0 && time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+		}
+		linkStorePath = orig
+	})
+	return ch, release
+}
+
+// stopWriteback ends the writeback loop, if one is running, and waits for it.
+func stopWriteback() {
+	writebackMu.Lock()
+	writebackLast = time.Time{} // idle: the loop looks every 100 ms
+	writebackMu.Unlock()
+	for {
+		writebackMu.Lock()
+		active := writebackActive
+		writebackMu.Unlock()
+		if !active {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// countSyncs replaces the sync of the writeback loop with a counter until
+// the test ends.
+func countSyncs(t testing.TB) *atomic.Int32 {
+	stopWriteback() // a loop of an earlier test would use the old syncfs
+	n := new(atomic.Int32)
+	orig := syncfs
+	syncfs = func(int) error { n.Add(1); return nil }
+	t.Cleanup(func() {
+		stopWriteback()
+		syncfs = orig
+	})
+	return n
+}
+
+// While a view is being linked, whether by the pool of ensureStoreView or
+// by a prepared build, the writeback loop does not sync; when the build is
+// done it does again.
+func TestWritebackWaitsForViewBuild(t *testing.T) {
+	for _, mode := range []string{"pool", "prepared"} {
+		t.Run(mode, func(t *testing.T) {
+			s := plainServer(t)
+			b := fakeBundle(t, s, mode, 6)
+			started, release := holdLinks(t)
+			built := make(chan error, 1)
+			if mode == "pool" {
+				go func() { built <- s.ensureStoreView(b) }()
+			} else {
+				s.prepareView(b.StoreLayers, b.StoreView)
+			}
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no link job started")
+			}
+			syncs := countSyncs(t)
+			s.kickWriteback()
+			time.Sleep(250 * time.Millisecond) // two or three rounds of the loop
+			if n := syncs.Load(); n != 0 {
+				t.Fatalf("%d syncs while a view was being linked", n)
+			}
+			release()
+			if mode == "pool" {
+				if err := <-built; err != nil {
+					t.Fatal(err)
+				}
+			} else if err := s.ensureStoreView(b); err != nil { // waits for the build
+				t.Fatal(err)
+			}
+			if n := linkJobs.Load(); n != 0 {
+				t.Fatalf("%d link jobs left after the build", n)
+			}
+			s.kickWriteback()
+			waitFor(t, "a sync after the build", func() bool { return syncs.Load() > 0 })
+		})
+	}
+}
+
+// A prepared build that only waits for uploads does not hold the loop back.
+func TestWritebackRunsWhileViewWaitsForUploads(t *testing.T) {
+	s := plainServer(t)
+	b := fakeBundle(t, s, "w", 3)
+	for _, l := range b.StoreLayers {
+		os.Rename(l, l+".uploading")
+	}
+	s.prepareView(b.StoreLayers, b.StoreView)
+	if n := linkJobs.Load(); n != 0 {
+		t.Fatalf("%d link jobs for a view that waits for uploads", n)
+	}
+	syncs := countSyncs(t)
+	s.kickWriteback()
+	waitFor(t, "a sync while the view waits for uploads", func() bool { return syncs.Load() > 0 })
+	for _, l := range b.StoreLayers {
+		os.Rename(l+".uploading", l)
+		s.layerReady(l)
+	}
+	if err := s.ensureStoreView(b); err != nil {
+		t.Fatal(err)
+	}
+	if n := linkJobs.Load(); n != 0 {
+		t.Fatalf("%d link jobs left after the build", n)
+	}
+}
+
+// A failed link job is not counted for ever, and leaves no complete view.
+func TestLinkJobsBalanceOnError(t *testing.T) {
+	s := plainServer(t)
+	for _, mode := range []string{"pool", "prepared"} {
+		b := fakeBundle(t, s, mode, 4)
+		os.RemoveAll(filepath.Join(b.StoreLayers[2], "nix")) // nothing to link
+		if mode == "prepared" {
+			s.prepareView(b.StoreLayers, b.StoreView)
+		}
+		if err := s.ensureStoreView(b); err == nil {
+			t.Fatalf("%s: view built from a broken store path", mode)
+		}
+		if n := linkJobs.Load(); n != 0 {
+			t.Fatalf("%s: %d link jobs left after the failed build", mode, n)
+		}
+		if _, err := os.Stat(b.StoreView + ".done"); err == nil {
+			t.Fatalf("%s: failed view marked complete", mode)
+		}
 	}
 }
 
