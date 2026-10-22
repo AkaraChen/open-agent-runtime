@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,6 +19,7 @@ import (
 func nixEvalCmd(g *globalOpts) *cobra.Command {
 	var system, nixpkgs, mirror, backend, expr string
 	var workers int
+	var timings bool
 	c := &cobra.Command{
 		Use:   "nix-eval [flags] ATTR...",
 		Short: "Resolve nixpkgs attributes to store paths, as oar build does",
@@ -39,6 +42,9 @@ Examples:
 			if expr != "" && len(args) > 0 {
 				return errors.New("--expr takes no attribute names")
 			}
+			if timings && expr == "" && !g.jsonOut {
+				return errors.New("--timings needs --json or --expr")
+			}
 			cfg, _ := g.loadConfig() // optional here
 			if nixpkgs == "" {
 				nixpkgs = spec.DefaultNixpkgsRevision
@@ -58,20 +64,31 @@ Examples:
 			if mirror == "" && cfg != nil {
 				mirror = cfg.Runtime.NixpkgsMirror
 			}
+			var tm nixeval.Timings
+			start := time.Now()
 			dir, err := nixeval.Source(ctx, nixpkgs, mirror, os.Stderr)
 			if err != nil {
 				return err
 			}
+			// a tree that is in place costs a stat: under a millisecond is no time
+			tm.Source = time.Since(start).Truncate(time.Millisecond)
 			req := nixeval.Request{
 				Nixpkgs: nixpkgs, NixpkgsDir: dir, System: system,
 				Attrs: args, Expr: expr, Workers: workers,
 				CacheDir: nixeval.IRCacheDir(),
 			}
+			start = time.Now()
 			out, err := ev.Eval(ctx, req)
 			if err != nil {
 				return err
 			}
+			tm.Eval = time.Since(start)
 			if expr != "" || g.jsonOut {
+				if timings {
+					if out, err = json.Marshal(nixeval.Timed{Result: out, Timings: tm}); err != nil {
+						return err
+					}
+				}
 				os.Stdout.Write(out)
 				if len(out) == 0 || out[len(out)-1] != '\n' {
 					fmt.Println()
@@ -102,5 +119,6 @@ Examples:
 	c.Flags().StringVar(&backend, "backend", "", "embedded, local or docker (default: the first available)")
 	c.Flags().StringVarP(&expr, "expr", "E", "", "evaluate an expression with pkgs and lib in scope instead of attributes")
 	c.Flags().IntVar(&workers, "workers", 0, "evaluator threads for the embedded backend (default: iets's own)")
+	c.Flags().BoolVar(&timings, "timings", false, "with --json or --expr, print {\"result\": ..., \"timings\": {\"source\": ns, \"eval\": ns}}: the time spent getting the nixpkgs source and in the evaluator, which oar build adds to its stats")
 	return c
 }

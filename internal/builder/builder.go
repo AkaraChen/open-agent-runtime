@@ -46,6 +46,15 @@ type Stats struct {
 	FetchedBytes  int64         `json:"fetchedBytes"`
 	ClosurePaths  int           `json:"closurePaths"`
 	ClosureBytes  int64         `json:"closureBytes"`
+
+	// NixSource and EvalRun split Eval into the time the `oar nix-eval`
+	// children spent getting the nixpkgs source (downloading and extracting
+	// it; zero when it is cached) and in the evaluator itself. ComponentBuild
+	// is the part of Components spent in the build commands of sources. Like
+	// the other durations they are summed over platforms.
+	NixSource      time.Duration `json:"nixSource"`
+	EvalRun        time.Duration `json:"evalRun"`
+	ComponentBuild time.Duration `json:"componentBuild"`
 }
 
 // Builder holds state for one build invocation.

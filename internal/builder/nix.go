@@ -72,10 +72,14 @@ func (b *Builder) evalPackages(p spec.Platform, rev string, attrs []string) (map
 	b.logf("evaluating nixpkgs@%s for %s: %s", rev[:min(12, len(rev))], system, strings.Join(missing, ", "))
 	b.stats(func(st *Stats) { st.EvaluatedAttr += len(missing) })
 	child := nixeval.Child{Log: b.opts.Log}
-	res, err := child.Eval(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing, Mirror: b.cfg.Runtime.NixpkgsMirror})
+	res, tm, err := child.EvalTimed(b.ctx, nixeval.Request{Nixpkgs: rev, System: system, Attrs: missing, Mirror: b.cfg.Runtime.NixpkgsMirror})
 	if err != nil {
 		return nil, err
 	}
+	b.stats(func(st *Stats) {
+		st.NixSource += tm.Source
+		st.EvalRun += tm.Eval
+	})
 	parsed, err := nixeval.ParseAttrs(res, missing)
 	if err != nil {
 		return nil, err

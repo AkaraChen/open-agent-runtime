@@ -120,6 +120,8 @@ oar nix-eval [flags] --expr EXPR
                       embedded when compiled in, else local, else docker)
   --workers N         evaluator threads (embedded only)
   --json              machine output; the default prints a table
+  --timings           with --json or --expr, print the output together with
+                      the time it took (below)
 ```
 
 With attributes it evaluates the builder's expression verbatim and prints
@@ -129,6 +131,14 @@ Evaluation errors go to stderr with exit status 1. A crash of the embedded
 evaluator is whatever the process died with (`SIGABRT`, status 1 from
 `process::exit`), and its stderr is the message.
 
+With `--timings` the JSON output is wrapped as
+`{ "result": <the output above>, "timings": { "source": ns, "eval": ns } }`:
+`source` is the time spent getting the nixpkgs tree (download and
+extraction; zero when it is cached) and `eval` the time in the evaluator
+call itself. Plain `--json` is left alone so that it is the same from one
+run to the next (CI diffs it between backends). A missing `timings`, or a
+missing field in it, reads as zero.
+
 Debugging flow this enables: `oar nix-eval --backend local nodejs_22` next
 to `oar nix-eval --backend embedded nodejs_22` and diff. `oar version`
 reports the embedded iets revision.
@@ -136,10 +146,12 @@ reports the embedded iets revision.
 ### Builder side
 
 `Builder.runNixEval` is replaced by one function: run
-`os.Executable() nix-eval --json --system S --nixpkgs REV ATTR...` under
-`exec.CommandContext(b.ctx)`, parse stdout, and on
+`os.Executable() nix-eval --json --timings --system S --nixpkgs REV ATTR...`
+under `exec.CommandContext(b.ctx)`, parse stdout, and on
 a non-zero exit wrap the captured stderr into the error together with a hint
 (`set OAR_NIX=local to use nix-instantiate`). The context cancels the child.
+The `timings` of the child are added to the `nixSource` and `evalRun` fields
+of the build statistics (`oar build --json`), summed over the children.
 Nothing else in the builder changes, and the attribute cache in
 `manifests/nix-eval.json` stays as it is.
 

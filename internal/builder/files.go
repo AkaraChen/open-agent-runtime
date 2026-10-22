@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/manifest"
 	"github.com/AkaraChen/open-agent-runtime/internal/nar"
@@ -42,7 +43,10 @@ func (b *Builder) runSourceBuild(name string, src *spec.Source, p spec.Platform)
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
+	start := time.Now()
+	err := cmd.Run()
+	b.stats(func(st *Stats) { st.ComponentBuild += time.Since(start) })
+	if err != nil {
 		return fmt.Errorf("build source %s: %w\n%s", name, err, out.String())
 	}
 	return nil

@@ -21,7 +21,7 @@ var aLongTimeAgo = time.Unix(1000, 0)
 func newTestBuilder(t *testing.T, sources map[string]*spec.Source) (*Builder, string) {
 	dir := t.TempDir()
 	cfg := &spec.Config{Dir: dir, Sources: sources}
-	return &Builder{ctx: context.Background(), cfg: cfg, opts: Options{Artifacts: filepath.Join(dir, "artifacts"), Log: io.Discard}, shared: &shared{}}, dir
+	return &Builder{ctx: context.Background(), cfg: cfg, opts: Options{Artifacts: filepath.Join(dir, "artifacts"), Log: io.Discard, Stats: &Stats{}}, shared: &shared{}}, dir
 }
 
 func TestImportDirAndFileDeterministic(t *testing.T) {
@@ -86,6 +86,32 @@ func TestImportBinaryELF(t *testing.T) {
 	}
 	if len(c.ELF) != 1 || c.ELF[0].Machine != "arm64" || !c.ELF[0].Static || c.Target != "/opt/hello" {
 		t.Fatalf("elf %+v target %s", c.ELF, c.Target)
+	}
+}
+
+// The time of the build commands of sources is summed into the stats.
+func TestSourceBuildTime(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	script := "echo hi\n"
+	b, _ := newTestBuilder(t, map[string]*spec.Source{
+		"slow":  {Path: "x", Build: []string{"sh", "-c", "sleep 0.1"}},
+		"plain": {Content: &script},
+	})
+	if err := b.runSourceBuild("plain", b.cfg.Sources["plain"], arm64); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.opts.Stats.ComponentBuild; got != 0 {
+		t.Fatalf("a source without a build command took %s", got)
+	}
+	for range 2 {
+		if err := b.runSourceBuild("slow", b.cfg.Sources["slow"], arm64); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := b.opts.Stats.ComponentBuild; got < 200*time.Millisecond {
+		t.Fatalf("two 100ms build commands took %s", got)
 	}
 }
 
