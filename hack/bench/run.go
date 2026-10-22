@@ -1010,6 +1010,13 @@ type runOut struct {
 		Cached    bool            `json:"cached"`
 		Timings   struct {
 			Compose, StoreView, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Snapshot, Restore, Total float64
+			// what the agent counted over the request: the runc child
+			// processes it started, and the CPU time (ns) of the agent
+			// process plus its children. Zero from agents that do not
+			// report them.
+			RuncExecs int     `json:"runcExecs"`
+			CPUUser   float64 `json:"cpuUser"`
+			CPUSys    float64 `json:"cpuSys"`
 		} `json:"timings"`
 		Replaced      string `json:"replaced"`
 		Restored      bool   `json:"restored"`
@@ -1024,6 +1031,43 @@ func (b *bench) run(name, bundle string) (*runOut, time.Duration, error) {
 	var r runOut
 	d, err := b.oarJSON(&r, "--bundle", bundle, "run", "--name", name)
 	return &r, d, err
+}
+
+// execCPU collects what the agent reports about its own work per request:
+// the runc processes it started and the CPU time (user + system, the agent
+// process plus its children) it used. The counts do not move with runner
+// noise, and CPU time is steadier than wall time. Zero means an agent that
+// does not report them (a real request always starts a runc process), so
+// such a request adds no sample.
+type execCPU struct {
+	execs, cpu, user, sys []float64
+}
+
+func (e *execCPU) observe(r *runOut) {
+	t := r.Result.Timings
+	if t.RuncExecs > 0 {
+		e.execs = append(e.execs, float64(t.RuncExecs))
+	}
+	if t.CPUUser+t.CPUSys > 0 {
+		e.cpu = append(e.cpu, (t.CPUUser+t.CPUSys)/1e6)
+		e.user = append(e.user, t.CPUUser/1e6)
+		e.sys = append(e.sys, t.CPUSys/1e6)
+	}
+}
+
+// record adds the two metrics, n/a when no request reported them.
+func (e *execCPU) record(b *bench, g, execsKey, execsName, cpuKey, cpuName string) {
+	if len(e.execs) > 0 {
+		b.add(g, execsKey, execsName, "个", true, e.execs...).Note = "agent 在这次请求里启动的 runc 进程数（create、start、state 等）"
+	} else {
+		b.na(g, execsKey, execsName, "agent 没有上报 runc 进程数（旧版 agent）")
+	}
+	if len(e.cpu) > 0 {
+		b.add(g, cpuKey, cpuName, "ms", true, e.cpu...).Note =
+			fmt.Sprintf("agent 进程及其 runc 子进程在这次请求期间的 CPU 时间；中位数 user %.1f + sys %.1f ms", median(e.user), median(e.sys))
+	} else {
+		b.na(g, cpuKey, cpuName, "agent 没有上报 CPU 时间（旧版 agent）")
+	}
 }
 
 // rm stops and deletes a container, forcing deletion if a graceful stop
@@ -1097,6 +1141,7 @@ func (b *bench) phaseStart() error {
 		n = 30
 	}
 	var e2e, compose, inst, create, start, total []float64
+	var ec execCPU
 	for i := 0; i < n; i++ {
 		r, wall, err := b.run("s", b.digests["idle"])
 		if err != nil {
@@ -1109,6 +1154,7 @@ func (b *bench) phaseStart() error {
 		create = append(create, t.Create/1e6)
 		start = append(start, t.Start/1e6)
 		total = append(total, t.Total/1e6)
+		ec.observe(r)
 		b.rm("s")
 	}
 	b.add(g, "e2e", "端到端启动（热，CLI 墙钟）", "ms", true, e2e...)
@@ -1117,6 +1163,7 @@ func (b *bench) phaseStart() error {
 	b.add(g, "instantiate", "　实例化（overlay + config.json）", "ms", true, inst...)
 	b.add(g, "create", "　runc create", "ms", true, create...)
 	b.add(g, "start", "　runc start", "ms", true, start...)
+	ec.record(b, g, "execs", "每次启动的 runc 子进程数", "cpu", "每次启动 agent 侧 CPU 时间（含 runc 子进程）")
 	// readiness for a service with a readiness check
 	var ready []float64
 	for i := 0; i < 5; i++ {
@@ -1526,7 +1573,7 @@ func (b *bench) probeSummaryFor(name string) (map[string]float64, error) {
 	return nil, fmt.Errorf("probe printed no summary")
 }
 
-func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down, stop []float64, err error) {
+func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down, stop []float64, ec execCPU, err error) {
 	if _, _, err = b.run("svc", b.digests[a]); err != nil {
 		return
 	}
@@ -1555,6 +1602,7 @@ func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall,
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		down = append(down, r.Result.Timings.Downtime/1e6)
 		stop = append(stop, r.Result.Timings.StopOld/1e6)
+		ec.observe(&r)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1575,7 +1623,7 @@ func (b *bench) phaseSwitch() error {
 		{"replace", "a-plain", "b-plain", "replace", "replace", false},
 		{"overlap", "a", "b", "overlap + 预创建（prepare）", "prepared", true},
 	} {
-		wall, guest, down, stop, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
+		wall, guest, down, stop, ec, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
 		if err != nil {
 			b.rm("svc")
 			b.rm("probe")
@@ -1592,6 +1640,7 @@ func (b *bench) phaseSwitch() error {
 		if sc.strategy == "replace" {
 			b.add(g, sc.key+".down", sc.label+"：服务端停机窗口", "ms", true, down...)
 		}
+		ec.record(b, g, sc.key+".execs", sc.label+"：每次切换的 runc 子进程数", sc.key+".cpu", sc.label+"：每次切换 agent 侧 CPU 时间（含 runc 子进程）")
 		total := sum["ok"] + sum["failed"]
 		b.add(g, sc.key+".failed", fmt.Sprintf("%s：客户端失败请求（%d 次切换）", sc.label, n), "个", true, sum["failed"]).Note =
 			fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
@@ -1718,6 +1767,7 @@ func (b *bench) ingressScenarios(n int) error {
 	}
 	time.Sleep(time.Second)
 	var wall, guest, drainT, stopT []float64
+	var ec execCPU
 	for i := 0; i < n; i++ {
 		target := "ing-b"
 		if i%2 == 1 {
@@ -1732,6 +1782,7 @@ func (b *bench) ingressScenarios(n int) error {
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		drainT = append(drainT, r.Result.Timings.Drain/1e6)
 		stopT = append(stopT, r.Result.Timings.StopOld/1e6)
+		ec.observe(&r)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1743,6 +1794,7 @@ func (b *bench) ingressScenarios(n int) error {
 	b.add(g, "ingress.guest", "入口代理切换：切换耗时（guest 内）", "ms", true, guest...)
 	b.add(g, "ingress.drain", "入口代理切换：旧实例排空在途连接", "ms", true, drainT...)
 	b.add(g, "ingress.stopold", "入口代理切换：等待旧实例退出（StopOld，guest 内）", "ms", true, stopT...)
+	ec.record(b, g, "ingress.execs", "入口代理切换：每次切换的 runc 子进程数", "ingress.cpu", "入口代理切换：每次切换 agent 侧 CPU 时间（含 runc 子进程）")
 	total := sum["ok"] + sum["failed"]
 	b.add(g, "ingress.failed", fmt.Sprintf("入口代理切换：客户端失败请求（%d 次切换，无需 SO_REUSEPORT）", n), "个", true, sum["failed"]).Note =
 		fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
