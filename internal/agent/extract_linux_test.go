@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,34 +85,87 @@ func TestExtractDotDot(t *testing.T) {
 	}
 }
 
+// synthTar returns a tar of nfiles regular files shaped like a store path:
+// directories two levels deep, mostly tiny read-only files (a fifth of them
+// executable), one symlink per eight files, and a few files larger than the
+// copy buffer. It is the same bytes every time, owned by the process's own
+// ids (as root-owned files are for the root agent), so runs are comparable.
+// The directories stay writable so that a run as an ordinary user can
+// remove what it extracted.
+func synthTar(tb testing.TB, nfiles int) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	put := func(h *tar.Header, data []byte) {
+		h.ModTime, h.Uid, h.Gid, h.Size = time.Unix(1, 0), euid, egid, int64(len(data))
+		if err := tw.WriteHeader(h); err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	rng := rand.New(rand.NewSource(1))
+	sizes := [...]int{0, 8, 24, 60, 100, 100, 180, 400, 900, 3000}
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 300<<10/16)
+	n := 0
+	for top := 0; n < nfiles; top++ {
+		put(&tar.Header{Name: fmt.Sprintf("d%03d/", top), Typeflag: tar.TypeDir, Mode: 0o755}, nil)
+		for sub := 0; sub < 5 && n < nfiles; sub++ {
+			put(&tar.Header{Name: fmt.Sprintf("d%03d/s%d/", top, sub), Typeflag: tar.TypeDir, Mode: 0o755}, nil)
+			for i := 0; i < 20 && n < nfiles; i++ {
+				name := fmt.Sprintf("d%03d/s%d/f%02d", top, sub, i)
+				size, mode := sizes[rng.Intn(len(sizes))], int64(0o444)
+				if n%1000 == 999 {
+					size = len(payload)
+				}
+				if n%5 == 0 {
+					mode = 0o555
+				}
+				put(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: mode}, payload[:size])
+				if n%8 == 0 {
+					put(&tar.Header{Name: name + ".lnk", Typeflag: tar.TypeSymlink, Linkname: filepath.Base(name), Mode: 0o777}, nil)
+				}
+				n++
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		tb.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 // BenchmarkExtract extracts every tar in $OAR_BENCH_TARS (for example a
 // closure's store artifacts) into a fresh directory per iteration and
-// writes it back.
+// writes it back. Without it, a generated tar of 5000 small files is used.
 func BenchmarkExtract(b *testing.B) {
-	dir := os.Getenv("OAR_BENCH_TARS")
-	if dir == "" {
-		b.Skip("set OAR_BENCH_TARS to a directory of tar files")
-	}
-	tars, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
 	var data [][]byte
-	for _, p := range tars {
-		d, err := os.ReadFile(p)
-		if err != nil {
-			b.Fatal(err)
+	if dir := os.Getenv("OAR_BENCH_TARS"); dir != "" {
+		tars, _ := filepath.Glob(filepath.Join(dir, "*.tar"))
+		for _, p := range tars {
+			d, err := os.ReadFile(p)
+			if err != nil {
+				b.Fatal(err)
+			}
+			data = append(data, d)
 		}
-		data = append(data, d)
+	} else {
+		data = append(data, synthTar(b, 5000))
 	}
+	b.ReportAllocs()
 	root := b.TempDir()
 	if r := os.Getenv("OAR_BENCH_ROOT"); r != "" {
 		root = r
 	}
 	files, i := 0, 0
+	var cpu time.Duration
 	for b.Loop() {
 		dest := filepath.Join(root, fmt.Sprintf("x%d", i))
 		i++
 		if err := os.MkdirAll(dest, 0o755); err != nil {
 			b.Fatal(err)
 		}
+		c0 := cpuTime()
 		files = 0
 		for _, d := range data {
 			n, err := extractTar(bytes.NewReader(d), dest)
@@ -122,12 +176,15 @@ func BenchmarkExtract(b *testing.B) {
 		}
 		// the time to write it back, then untimed cleanup
 		syncDir(root)
+		cpu += cpuTime() - c0
 		b.StopTimer()
 		os.RemoveAll(dest)
 		syncDir(root)
 		b.StartTimer()
 	}
 	b.ReportMetric(float64(files), "files/op")
+	// CPU time is steadier than the wall clock on a busy machine
+	b.ReportMetric(float64(cpu.Microseconds())/1000/float64(i), "cpu-ms/op")
 }
 
 func syncDir(dir string) {
