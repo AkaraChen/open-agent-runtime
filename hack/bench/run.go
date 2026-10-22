@@ -194,11 +194,17 @@ func (b *bench) guestDir() string {
 
 // oarCmd runs the CLI and returns stdout and the wall time.
 func (b *bench) oarCmd(args ...string) ([]byte, time.Duration, error) {
+	return b.oarCmdEnv(nil, args...)
+}
+
+// oarCmdEnv is oarCmd with extra environment variables for the CLI process
+// (KEY=value; they replace inherited ones).
+func (b *bench) oarCmdEnv(env []string, args ...string) ([]byte, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	full := append([]string{"--artifacts", b.art}, args...)
 	cmd := exec.CommandContext(ctx, b.oar, full...)
-	cmd.Env = b.env()
+	cmd.Env = append(b.env(), env...)
 	cmd.Dir = b.exDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -212,7 +218,11 @@ func (b *bench) oarCmd(args ...string) ([]byte, time.Duration, error) {
 }
 
 func (b *bench) oarJSON(v any, args ...string) (time.Duration, error) {
-	out, d, err := b.oarCmd(append([]string{"--json"}, args...)...)
+	return b.oarJSONEnv(nil, v, args...)
+}
+
+func (b *bench) oarJSONEnv(env []string, v any, args ...string) (time.Duration, error) {
+	out, d, err := b.oarCmdEnv(env, append([]string{"--json"}, args...)...)
 	if err != nil {
 		return d, err
 	}
@@ -389,19 +399,40 @@ type buildOut struct {
 		FetchedBytes  int64   `json:"fetchedBytes"`
 		ClosurePaths  int     `json:"closurePaths"`
 		ClosureBytes  int64   `json:"closureBytes"`
+		// NixSource is the part of Eval spent downloading and unpacking the
+		// nixpkgs checkout, ComponentBuild the part of Components spent in the
+		// user's build: commands. Zero means the builder does not report it
+		// (or there was nothing to download), not that it took no time.
+		NixSource      float64 `json:"nixSource"`
+		ComponentBuild float64 `json:"componentBuild"`
 	} `json:"stats"`
 }
 
-// buildSplit describes where a build's wall time went.
+// buildSplit describes where a build's wall time went. The base image, the
+// nix closure (evaluate, then download) and the components are built side by
+// side, so the parts add up to more than the builder's time.
 func buildSplit(o *buildOut, wall time.Duration) string {
 	st := o.Stats
-	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、求值 %.0f、下载 %.0f、组件 %.0f），其余（CLI 进程、配置、锁文件）%.0f ms",
-		st.Total/1e6, st.Base/1e6, st.Eval/1e6, st.Fetch/1e6, st.Components/1e6, ms(wall)-st.Total/1e6)
+	eval := fmt.Sprintf("求值 %.0f", st.Eval/1e6)
+	if st.NixSource > 0 {
+		eval += fmt.Sprintf("（其中 nixpkgs 源码获取 %.0f）", st.NixSource/1e6)
+	}
+	comp := fmt.Sprintf("组件 %.0f", st.Components/1e6)
+	if st.ComponentBuild > 0 {
+		comp += fmt.Sprintf("（其中用户 build 命令 %.0f、导入 %.0f）", st.ComponentBuild/1e6, math.Max(0, st.Components-st.ComponentBuild)/1e6)
+	}
+	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、%s、下载 %.0f、%s），其余（CLI 进程、配置、锁文件）%.0f ms",
+		st.Total/1e6, st.Base/1e6, eval, st.Fetch/1e6, comp, ms(wall)-st.Total/1e6)
 }
 
 func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
+	return b.buildEnv(nil, name, cfg)
+}
+
+// buildEnv is build with extra environment variables for the CLI process.
+func (b *bench) buildEnv(env []string, name, cfg string) (*buildOut, time.Duration, error) {
 	var out buildOut
-	d, err := b.oarJSON(&out, "-f", cfg, "build", "--platform", b.platform)
+	d, err := b.oarJSONEnv(env, &out, "-f", cfg, "build", "--platform", b.platform)
 	if err != nil {
 		return nil, d, err
 	}
@@ -411,6 +442,21 @@ func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
 	}
 	b.digests[name] = pl.BundleDigest
 	return &out, d, nil
+}
+
+// resetArtifacts empties the artifacts directory, so that the next build
+// starts from nothing. The directory itself stays: --artifacts points at it.
+func (b *bench) resetArtifacts() error {
+	entries, err := os.ReadDir(b.art)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(b.art, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *bench) cleanup() {
@@ -513,19 +559,90 @@ func metadataOps(n int) (time.Duration, error) {
 
 // ---- phase 1: build ----
 
+// goBuildCache is where `go build` keeps its cache in this environment.
+// buildFresh redirects XDG_CACHE_HOME, which also moves Go's default cache,
+// and the user's build: command (go build) must not pay for a cold one.
+func goBuildCache() string {
+	out, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// buildFresh measures the first build on a machine: an empty artifacts
+// directory, and no nixpkgs checkout or evaluator cache either. The builder
+// keeps those in the user cache directory (nixeval.CacheDir), which Go's
+// os.UserCacheDir takes from $XDG_CACHE_HOME on Linux but from
+// ~/Library/Caches on macOS. Only HOME would move that, and a different HOME
+// also empties everything else a user's build command keeps there, so macOS
+// reports n/a. The artifacts directory is left empty afterwards.
+func (b *bench) buildFresh(g, cfg string) error {
+	const key, name = "build.fresh", "首次在这台机器上构建（含 nixpkgs 源码获取）"
+	if runtime.GOOS != "linux" {
+		b.na(g, key, name, fmt.Sprintf("%s 上 os.UserCacheDir 不跟随 XDG_CACHE_HOME（macOS 是 ~/Library/Caches）；把 nixpkgs 源码缓存放进空目录只能改 HOME，那会连 Go 构建缓存等一起清空，所以不测", runtime.GOOS))
+		return nil
+	}
+	cache, err := os.MkdirTemp("", "oar-bench-cache-")
+	if err != nil {
+		b.na(g, key, name, err.Error())
+		return nil
+	}
+	defer os.RemoveAll(cache)
+	env := []string{"XDG_CACHE_HOME=" + cache}
+	if gc := goBuildCache(); gc != "" {
+		env = append(env, "GOCACHE="+gc)
+	}
+	out, wall, err := b.buildEnv(env, "a", cfg)
+	if err != nil {
+		b.fail(g, key, name, err.Error())
+	} else {
+		b.add(g, key, name, "s", true, wall.Seconds()).Note =
+			buildSplit(out, wall) + "；nixpkgs 源码和求值器缓存是空的（XDG_CACHE_HOME 指向新目录），Go 构建缓存沿用宿主机的（GOCACHE），用户 build 命令不付冷编译的代价"
+		if out.Stats.NixSource > 0 {
+			b.add(g, key+".source", "　其中：nixpkgs 源码获取", "s", true, out.Stats.NixSource/1e9)
+		} else {
+			b.na(g, key+".source", "　其中：nixpkgs 源码获取", "构建器没有上报 nixSource")
+		}
+	}
+	return b.resetArtifacts()
+}
+
 func (b *bench) phaseBuild() error {
 	const g = "1-build"
 	a := b.writeConfig("a", cfgOpts{env: map[string]string{"VARIANT": "a", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"})
+	// One untimed build first. It fills what a build needs besides the
+	// artifacts: the nixpkgs checkout and the evaluator's compiled-file cache
+	// in the user cache directory, and the Go build cache of the user's
+	// build: command. The builds below then measure oar, not the first build
+	// on this machine, which build.fresh measures on its own.
+	if _, _, err := b.build("a", a); err != nil {
+		return err
+	}
+	if err := b.resetArtifacts(); err != nil {
+		return err
+	}
+	if err := b.buildFresh(g, a); err != nil {
+		return err
+	}
 	out, wall, err := b.build("a", a)
 	if err != nil {
 		return err
 	}
 	s := out.Stats
-	b.add(g, "cold.total", "全量构建（空产物目录）", "s", true, wall.Seconds())
+	b.add(g, "cold.total", "全量构建（空产物目录，源码缓存已热）", "s", true, wall.Seconds()).Note =
+		"基础镜像、Nix（求值，然后下载）、组件导入三路并发，总时间取最长的一路，所以下面各项相加会超过总计；源码缓存冷的第一次构建见“首次在这台机器上构建”"
 	b.add(g, "cold.base", "　其中：基础镜像拉取与展平", "s", true, s.Base/1e9)
-	b.add(g, "cold.eval", "　其中：Nix 求值", "s", true, s.Eval/1e9).Note = "nix 自身的 tarball/eval 缓存可能已预热"
+	b.add(g, "cold.eval", "　其中：Nix 求值", "s", true, s.Eval/1e9).Note =
+		"nixpkgs 源码和求值器的编译缓存（用户缓存目录下的 oar/）已由一次不计时的构建填好，这里只是求值本身"
 	b.add(g, "cold.fetch", "　其中：闭包下载与 NAR→tar", "s", true, s.Fetch/1e9)
-	b.add(g, "cold.components", "　其中：组件构建与导入", "s", true, s.Components/1e9)
+	if s.ComponentBuild > 0 {
+		b.add(g, "cold.components.build", "　其中：组件 build 命令（用户命令）", "s", true, s.ComponentBuild/1e9).Note =
+			"sources.*.build 里的命令（这里是 go build ./my-agent），不是 oar 的开销，每次构建都会运行"
+		b.add(g, "cold.components.import", "　其中：组件导入", "s", true, math.Max(0, s.Components-s.ComponentBuild)/1e9)
+	} else {
+		b.add(g, "cold.components", "　其中：组件构建与导入", "s", true, s.Components/1e9)
+	}
 	b.add(g, "cold.fetched", "下载的 store path / 字节", "MiB", true, float64(s.FetchedBytes)/(1<<20)).Note = fmt.Sprintf("%d 个 store path", s.FetchedPaths)
 	b.add(g, "closure.paths", "闭包 store path 数", "个", true, float64(s.ClosurePaths))
 	b.add(g, "closure.size", "闭包大小（tar）", "MiB", true, float64(s.ClosureBytes)/(1<<20))
