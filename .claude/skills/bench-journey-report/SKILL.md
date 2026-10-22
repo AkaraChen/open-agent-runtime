@@ -30,12 +30,14 @@ the report.
    $ for l in native kvm vz-intel qemu-arm64; do gh run download $R -n results-$l -D <dir>; done
    ```
 
-4. Extract the journey numbers against the baseline. "Before" is the step 0
-   baseline (`docs/benchmarks/00-baseline`, measured before any
-   optimization) unless the user names another point:
+4. Extract the journey numbers against the baseline. "Before" is the
+   current baseline (`docs/benchmarks/13-baseline`, the handoff point
+   after steps 0–13) unless the user names another point; use
+   `docs/benchmarks/00-baseline` (before any optimization) for the whole
+   history:
 
    ```console
-   $ python3 -I .claude/skills/bench-journey-report/journey.py docs/benchmarks/00-baseline <dir>
+   $ python3 -I .claude/skills/bench-journey-report/journey.py docs/benchmarks/13-baseline <dir>
    ```
 
    Every number in the report must come from this output (or from a
@@ -51,7 +53,7 @@ Structure, in this order:
 
 1. One framing sentence: which backend the walk-through uses (kvm on
    Linux: a resident lightweight VM per container host), what the numbers
-   mean (`优化前 → 现在`, before = step 0 baseline, all from CI benchmark),
+   mean (`基线 → 现在`, naming which baseline, all from CI benchmark),
    and the workload (Debian + Node.js + Python + git + the agent, 120 Nix
    store paths, about 553 MiB; take the size from `1-build/closure.*`).
 2. Numbered journey steps, each a bold heading plus a short paragraph or
