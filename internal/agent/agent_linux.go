@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -951,7 +952,19 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 	}
 	deadline := time.Now().Add(timeout)
 	var last error
+	var logs logSearch
+	defer logs.close()
 	for {
+		// PERF: the tcp and log probes cost microseconds (a dial to a port
+		// nobody listens on yet, the bytes the log gained), and so does the
+		// liveness check below, which reads runc's state files. They run
+		// every millisecond, so readiness is noticed within a millisecond of
+		// the application being ready. Each round used to be a `runc state`
+		// exec (4.6 ms on KVM, 100 ms on vz, 250 ms on TCG) plus a 10 ms
+		// sleep, which made readiness come in steps of 14.6 ms on KVM. The
+		// exec probe runs a process in the container each time and keeps
+		// its 10 ms.
+		pause := time.Millisecond
 		switch {
 		case r.TCP != "":
 			c, err := net.DialTimeout("tcp", r.TCP, 200*time.Millisecond)
@@ -961,14 +974,17 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 			}
 			last = err
 		case len(r.Exec) > 0:
+			pause = 10 * time.Millisecond
 			code, _, stderr, err := s.cfg.Runc.Exec(ctx, in.ID, nil, r.Exec)
 			if err == nil && code == 0 {
 				return nil
 			}
 			last = fmt.Errorf("exit %d: %v %s", code, err, strings.TrimSpace(stderr))
 		case r.Log != "":
-			b, err := os.ReadFile(filepath.Join(in.dir, "console.log"))
-			if err == nil && strings.Contains(string(b), r.Log) {
+			if logs.needle == nil {
+				logs.path, logs.needle = filepath.Join(in.dir, "console.log"), []byte(r.Log)
+			}
+			if logs.found() {
 				return nil
 			}
 			last = fmt.Errorf("%q not in output yet", r.Log)
@@ -982,8 +998,54 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(pause):
 		}
+	}
+}
+
+// logSearch looks for a string in a log that grows. Every call continues
+// where the previous one stopped, so polling it every millisecond reads each
+// byte of the log once instead of the whole log every time.
+type logSearch struct {
+	path   string
+	needle []byte
+	f      *os.File
+	off    int64  // bytes read so far
+	carry  []byte // the last len(needle)-1 of them: a match may straddle two reads
+	buf    []byte
+}
+
+// found reports whether the string is in the log so far.
+func (l *logSearch) found() bool {
+	if l.f == nil {
+		f, err := os.Open(l.path)
+		if err != nil {
+			return false
+		}
+		l.f = f
+		l.buf = make([]byte, max(32<<10, 2*len(l.needle)))
+	}
+	for {
+		n := copy(l.buf, l.carry)
+		m, err := l.f.ReadAt(l.buf[n:], l.off)
+		if m == 0 {
+			return false // nothing new yet
+		}
+		l.off += int64(m)
+		data := l.buf[:n+m]
+		if bytes.Contains(data, l.needle) {
+			return true
+		}
+		l.carry = append(l.carry[:0], data[max(0, len(data)-len(l.needle)+1):]...)
+		if err != nil {
+			return false // the end of the log for now
+		}
+	}
+}
+
+func (l *logSearch) close() {
+	if l.f != nil {
+		l.f.Close()
 	}
 }
 
