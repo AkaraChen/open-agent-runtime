@@ -87,13 +87,13 @@ func (t *tarFile) Seek(off int64, whence int) (int64, error) {
 var copyFileRangeMax int64 = 1 << 30
 
 // copyTo copies n bytes starting at the file offset off into dst.
-func (t *tarFile) copyTo(dst *os.File, off, n int64) error {
+func (t *tarFile) copyTo(dst *fileWriter, off, n int64) error {
 	for n > 0 {
 		// The kernel advances off by the bytes it copied, so it must not be
 		// advanced again here. A copy is short when the cap applies and when
 		// a signal arrives while it runs (SIGPROF, every 10 ms while the
 		// agent is CPU profiled); advancing twice then skipped data.
-		c, err := unix.CopyFileRange(int(t.f.Fd()), &off, int(dst.Fd()), nil, int(min(n, copyFileRangeMax)), 0)
+		c, err := unix.CopyFileRange(int(t.f.Fd()), &off, dst.fd, nil, int(min(n, copyFileRangeMax)), 0)
 		if c == 0 && err == nil {
 			return io.ErrUnexpectedEOF
 		}
@@ -103,8 +103,7 @@ func (t *tarFile) copyTo(dst *os.File, off, n int64) error {
 			}
 			// not supported between these files (EXDEV on older kernels,
 			// EINVAL, ENOSYS...): copy what is left the ordinary way
-			_, err := io.Copy(dst, io.NewSectionReader(t.f, off, n))
-			return err
+			return dst.copyFrom(io.NewSectionReader(t.f, off, n))
 		}
 		n -= int64(c)
 	}

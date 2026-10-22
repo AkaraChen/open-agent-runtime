@@ -120,7 +120,7 @@ func TestTarFileCopyToShortCopies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = tf.copyTo(dst, off, n)
+		err = tf.copyTo(&fileWriter{fd: int(dst.Fd()), name: dst.Name(), buf: make([]byte, copyBufSize)}, off, n)
 		dst.Close()
 		got, _ := os.ReadFile(dst.Name())
 		return got, err
