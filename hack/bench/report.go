@@ -106,11 +106,17 @@ func cell(m *Metric) string {
 	return s
 }
 
-func delta(m, prev *Metric) string {
+// delta formats the change of m against prev. cpuDiff says the two runs were
+// on different CPU models: the change then says more about the runner than
+// about oar, so it is a plain percentage with no verdict.
+func delta(m, prev *Metric, cpuDiff bool) string {
 	if prev == nil || prev.Status != "ok" || m.Status != "ok" || m.Unit == "通过" || prev.P50 == 0 {
 		return ""
 	}
 	d := (m.P50 - prev.P50) / math.Abs(prev.P50) * 100
+	if cpuDiff {
+		return fmt.Sprintf(" (%s，CPU 不同)", pct(d))
+	}
 	if math.Abs(d) < 5 {
 		return " (≈)"
 	}
@@ -123,6 +129,35 @@ func delta(m, prev *Metric) string {
 		mark = "🟢"
 	}
 	return fmt.Sprintf(" (%s%+.0f%%)", mark, d)
+}
+
+// pct formats a percentage change with a sign and no decimals.
+func pct(d float64) string {
+	if r := math.Round(d); r != 0 {
+		return fmt.Sprintf("%+.0f%%", r)
+	}
+	return "0%"
+}
+
+// cpuModel is the CPU model in a Result.Host, which hostDesc writes as
+// "<goos>/<goarch> <hostname> · <cpu model> · <N> CPU". It is empty when the
+// host reported none (no "model name" in /proc/cpuinfo, as on arm64 Linux).
+func cpuModel(host string) string {
+	parts := strings.Split(host, " · ")
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.Join(parts[1:len(parts)-1], " · ")), " ")
+}
+
+// differentCPU reports whether two results were measured on different CPU
+// models. A result without a model counts as unknown, not as different.
+func differentCPU(cur, prev *Result) bool {
+	if cur == nil || prev == nil {
+		return false
+	}
+	a, b := cpuModel(cur.Host), cpuModel(prev.Host)
+	return a != "" && b != "" && !strings.EqualFold(a, b)
 }
 
 func find(r *Result, group, key string) *Metric {
@@ -149,6 +184,18 @@ func render(title, intro string, results []*Result, base map[string]*Result) str
 	sb.WriteString("## 测试环境\n\n| 后端 | 平台 | 宿主机 | commit | 档位 | 耗时 |\n|---|---|---|---|---|---|\n")
 	for _, r := range results {
 		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s | %.0f s |\n", r.Backend, r.Platform, r.Host, r.Commit, r.Profile, r.Duration)
+	}
+	// backends whose baseline ran on another CPU model
+	cpuDiff := map[string]bool{}
+	var cpuNotes []string
+	for _, r := range results {
+		if differentCPU(r, base[r.Backend]) {
+			cpuDiff[r.Backend] = true
+			cpuNotes = append(cpuNotes, fmt.Sprintf("%s（基线 %s → 本次 %s）", r.Backend, cpuModel(base[r.Backend].Host), cpuModel(r.Host)))
+		}
+	}
+	if len(cpuNotes) > 0 {
+		fmt.Fprintf(&sb, "\n> 与基线的 CPU 型号不同：%s。这些后端的变化只写百分比并标注“CPU 不同”，不标 🟢/🔺/≈：换了宿主机，差异不能算作 oar 的改善或退化。\n", strings.Join(cpuNotes, "；"))
 	}
 	sb.WriteString("\n读表方法：单值指标直接给出数值；多次采样的指标写成 `p50 / p99`。括号里是相对上一步基线的变化：🟢 表示改善，🔺 表示变差，≈ 表示变化不到 5%。— 表示该后端不适用，❌ 表示失败。\n\n")
 
@@ -205,7 +252,7 @@ func render(title, intro string, results []*Result, base map[string]*Result) str
 				sb.WriteString(" — |")
 				continue
 			}
-			fmt.Fprintf(&sb, " %s%s |", cell(m), delta(m, find(base[r.Backend], k.g, k.k)))
+			fmt.Fprintf(&sb, " %s%s |", cell(m), delta(m, find(base[r.Backend], k.g, k.k), cpuDiff[r.Backend]))
 			if m.Note != "" {
 				notes[r.Backend] = m.Note
 			}

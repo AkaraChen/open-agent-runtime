@@ -194,11 +194,17 @@ func (b *bench) guestDir() string {
 
 // oarCmd runs the CLI and returns stdout and the wall time.
 func (b *bench) oarCmd(args ...string) ([]byte, time.Duration, error) {
+	return b.oarCmdEnv(nil, args...)
+}
+
+// oarCmdEnv is oarCmd with extra environment variables for the CLI process
+// (KEY=value; they replace inherited ones).
+func (b *bench) oarCmdEnv(env []string, args ...string) ([]byte, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	full := append([]string{"--artifacts", b.art}, args...)
 	cmd := exec.CommandContext(ctx, b.oar, full...)
-	cmd.Env = b.env()
+	cmd.Env = append(b.env(), env...)
 	cmd.Dir = b.exDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -212,7 +218,11 @@ func (b *bench) oarCmd(args ...string) ([]byte, time.Duration, error) {
 }
 
 func (b *bench) oarJSON(v any, args ...string) (time.Duration, error) {
-	out, d, err := b.oarCmd(append([]string{"--json"}, args...)...)
+	return b.oarJSONEnv(nil, v, args...)
+}
+
+func (b *bench) oarJSONEnv(env []string, v any, args ...string) (time.Duration, error) {
+	out, d, err := b.oarCmdEnv(env, append([]string{"--json"}, args...)...)
 	if err != nil {
 		return d, err
 	}
@@ -389,19 +399,40 @@ type buildOut struct {
 		FetchedBytes  int64   `json:"fetchedBytes"`
 		ClosurePaths  int     `json:"closurePaths"`
 		ClosureBytes  int64   `json:"closureBytes"`
+		// NixSource is the part of Eval spent downloading and unpacking the
+		// nixpkgs checkout, ComponentBuild the part of Components spent in the
+		// user's build: commands. Zero means the builder does not report it
+		// (or there was nothing to download), not that it took no time.
+		NixSource      float64 `json:"nixSource"`
+		ComponentBuild float64 `json:"componentBuild"`
 	} `json:"stats"`
 }
 
-// buildSplit describes where a build's wall time went.
+// buildSplit describes where a build's wall time went. The base image, the
+// nix closure (evaluate, then download) and the components are built side by
+// side, so the parts add up to more than the builder's time.
 func buildSplit(o *buildOut, wall time.Duration) string {
 	st := o.Stats
-	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、求值 %.0f、下载 %.0f、组件 %.0f），其余（CLI 进程、配置、锁文件）%.0f ms",
-		st.Total/1e6, st.Base/1e6, st.Eval/1e6, st.Fetch/1e6, st.Components/1e6, ms(wall)-st.Total/1e6)
+	eval := fmt.Sprintf("求值 %.0f", st.Eval/1e6)
+	if st.NixSource > 0 {
+		eval += fmt.Sprintf("（其中 nixpkgs 源码获取 %.0f）", st.NixSource/1e6)
+	}
+	comp := fmt.Sprintf("组件 %.0f", st.Components/1e6)
+	if st.ComponentBuild > 0 {
+		comp += fmt.Sprintf("（其中用户 build 命令 %.0f、导入 %.0f）", st.ComponentBuild/1e6, math.Max(0, st.Components-st.ComponentBuild)/1e6)
+	}
+	return fmt.Sprintf("构建器 %.0f ms（基础镜像 %.0f、%s、下载 %.0f、%s），其余（CLI 进程、配置、锁文件）%.0f ms",
+		st.Total/1e6, st.Base/1e6, eval, st.Fetch/1e6, comp, ms(wall)-st.Total/1e6)
 }
 
 func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
+	return b.buildEnv(nil, name, cfg)
+}
+
+// buildEnv is build with extra environment variables for the CLI process.
+func (b *bench) buildEnv(env []string, name, cfg string) (*buildOut, time.Duration, error) {
 	var out buildOut
-	d, err := b.oarJSON(&out, "-f", cfg, "build", "--platform", b.platform)
+	d, err := b.oarJSONEnv(env, &out, "-f", cfg, "build", "--platform", b.platform)
 	if err != nil {
 		return nil, d, err
 	}
@@ -411,6 +442,21 @@ func (b *bench) build(name, cfg string) (*buildOut, time.Duration, error) {
 	}
 	b.digests[name] = pl.BundleDigest
 	return &out, d, nil
+}
+
+// resetArtifacts empties the artifacts directory, so that the next build
+// starts from nothing. The directory itself stays: --artifacts points at it.
+func (b *bench) resetArtifacts() error {
+	entries, err := os.ReadDir(b.art)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(b.art, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *bench) cleanup() {
@@ -448,6 +494,23 @@ func (b *bench) phaseEnv() error {
 		cpu = append(cpu, ms(time.Since(t)))
 	}
 	b.add(g, "cpu", "宿主机单核 CPU（sha256 64 MiB）", "ms", true, cpu...)
+	// file metadata operations are what unpacking and view building spend
+	// their time on; the sha256 loop does not exercise them, and hosts with
+	// the same CPU model can still differ here
+	const metaName = "宿主机元数据操作（创建+stat+删除 5000 个文件）"
+	var meta []float64
+	for i := 0; i < 3; i++ {
+		d, err := metadataOps(5000)
+		if err != nil {
+			meta = nil
+			b.na(g, "meta", metaName, err.Error())
+			break
+		}
+		meta = append(meta, ms(d))
+	}
+	if meta != nil {
+		b.add(g, "meta", metaName, "ms", true, meta...).Note = "5000 个 1 字节文件，在 os.TempDir() 下新建的目录里"
+	}
 	f, err := os.CreateTemp(b.art, "disk-")
 	if err == nil {
 		t := time.Now()
@@ -463,21 +526,123 @@ func (b *bench) phaseEnv() error {
 	return nil
 }
 
+// metadataOps creates, stats and removes n one-byte files in a fresh
+// directory under os.TempDir() and returns how long that took.
+func metadataOps(n int) (time.Duration, error) {
+	dir, err := os.MkdirTemp("", "oar-bench-meta-")
+	if err != nil {
+		return 0, err
+	}
+	defer os.RemoveAll(dir)
+	names := make([]string, n)
+	for i := range names {
+		names[i] = filepath.Join(dir, "f"+strconv.Itoa(i))
+	}
+	t := time.Now()
+	for _, p := range names {
+		if err := os.WriteFile(p, []byte{'x'}, 0o644); err != nil {
+			return 0, err
+		}
+	}
+	for _, p := range names {
+		if _, err := os.Stat(p); err != nil {
+			return 0, err
+		}
+	}
+	for _, p := range names {
+		if err := os.Remove(p); err != nil {
+			return 0, err
+		}
+	}
+	return time.Since(t), nil
+}
+
 // ---- phase 1: build ----
+
+// goBuildCache is where `go build` keeps its cache in this environment.
+// buildFresh redirects XDG_CACHE_HOME, which also moves Go's default cache,
+// and the user's build: command (go build) must not pay for a cold one.
+func goBuildCache() string {
+	out, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// buildFresh measures the first build on a machine: an empty artifacts
+// directory, and no nixpkgs checkout or evaluator cache either. The builder
+// keeps those in the user cache directory (nixeval.CacheDir), which Go's
+// os.UserCacheDir takes from $XDG_CACHE_HOME on Linux but from
+// ~/Library/Caches on macOS. Only HOME would move that, and a different HOME
+// also empties everything else a user's build command keeps there, so macOS
+// reports n/a. The artifacts directory is left empty afterwards.
+func (b *bench) buildFresh(g, cfg string) error {
+	const key, name = "build.fresh", "首次在这台机器上构建（含 nixpkgs 源码获取）"
+	if runtime.GOOS != "linux" {
+		b.na(g, key, name, fmt.Sprintf("%s 上 os.UserCacheDir 不跟随 XDG_CACHE_HOME（macOS 是 ~/Library/Caches）；把 nixpkgs 源码缓存放进空目录只能改 HOME，那会连 Go 构建缓存等一起清空，所以不测", runtime.GOOS))
+		return nil
+	}
+	cache, err := os.MkdirTemp("", "oar-bench-cache-")
+	if err != nil {
+		b.na(g, key, name, err.Error())
+		return nil
+	}
+	defer os.RemoveAll(cache)
+	env := []string{"XDG_CACHE_HOME=" + cache}
+	if gc := goBuildCache(); gc != "" {
+		env = append(env, "GOCACHE="+gc)
+	}
+	out, wall, err := b.buildEnv(env, "a", cfg)
+	if err != nil {
+		b.fail(g, key, name, err.Error())
+	} else {
+		b.add(g, key, name, "s", true, wall.Seconds()).Note =
+			buildSplit(out, wall) + "；nixpkgs 源码和求值器缓存是空的（XDG_CACHE_HOME 指向新目录），Go 构建缓存沿用宿主机的（GOCACHE），用户 build 命令不付冷编译的代价"
+		if out.Stats.NixSource > 0 {
+			b.add(g, key+".source", "　其中：nixpkgs 源码获取", "s", true, out.Stats.NixSource/1e9)
+		} else {
+			b.na(g, key+".source", "　其中：nixpkgs 源码获取", "构建器没有上报 nixSource")
+		}
+	}
+	return b.resetArtifacts()
+}
 
 func (b *bench) phaseBuild() error {
 	const g = "1-build"
 	a := b.writeConfig("a", cfgOpts{env: map[string]string{"VARIANT": "a", "MY_AGENT_LISTEN": fmt.Sprintf("127.0.0.1:%d", port), "MY_AGENT_REUSEPORT": "1"}, ready: "my-agent: serving on"})
+	// One untimed build first. It fills what a build needs besides the
+	// artifacts: the nixpkgs checkout and the evaluator's compiled-file cache
+	// in the user cache directory, and the Go build cache of the user's
+	// build: command. The builds below then measure oar, not the first build
+	// on this machine, which build.fresh measures on its own.
+	if _, _, err := b.build("a", a); err != nil {
+		return err
+	}
+	if err := b.resetArtifacts(); err != nil {
+		return err
+	}
+	if err := b.buildFresh(g, a); err != nil {
+		return err
+	}
 	out, wall, err := b.build("a", a)
 	if err != nil {
 		return err
 	}
 	s := out.Stats
-	b.add(g, "cold.total", "全量构建（空产物目录）", "s", true, wall.Seconds())
+	b.add(g, "cold.total", "全量构建（空产物目录，源码缓存已热）", "s", true, wall.Seconds()).Note =
+		"基础镜像、Nix（求值，然后下载）、组件导入三路并发，总时间取最长的一路，所以下面各项相加会超过总计；源码缓存冷的第一次构建见“首次在这台机器上构建”"
 	b.add(g, "cold.base", "　其中：基础镜像拉取与展平", "s", true, s.Base/1e9)
-	b.add(g, "cold.eval", "　其中：Nix 求值", "s", true, s.Eval/1e9).Note = "nix 自身的 tarball/eval 缓存可能已预热"
+	b.add(g, "cold.eval", "　其中：Nix 求值", "s", true, s.Eval/1e9).Note =
+		"nixpkgs 源码和求值器的编译缓存（用户缓存目录下的 oar/）已由一次不计时的构建填好，这里只是求值本身"
 	b.add(g, "cold.fetch", "　其中：闭包下载与 NAR→tar", "s", true, s.Fetch/1e9)
-	b.add(g, "cold.components", "　其中：组件构建与导入", "s", true, s.Components/1e9)
+	if s.ComponentBuild > 0 {
+		b.add(g, "cold.components.build", "　其中：组件 build 命令（用户命令）", "s", true, s.ComponentBuild/1e9).Note =
+			"sources.*.build 里的命令（这里是 go build ./my-agent），不是 oar 的开销，每次构建都会运行"
+		b.add(g, "cold.components.import", "　其中：组件导入", "s", true, math.Max(0, s.Components-s.ComponentBuild)/1e9)
+	} else {
+		b.add(g, "cold.components", "　其中：组件构建与导入", "s", true, s.Components/1e9)
+	}
 	b.add(g, "cold.fetched", "下载的 store path / 字节", "MiB", true, float64(s.FetchedBytes)/(1<<20)).Note = fmt.Sprintf("%d 个 store path", s.FetchedPaths)
 	b.add(g, "closure.paths", "闭包 store path 数", "个", true, float64(s.ClosurePaths))
 	b.add(g, "closure.size", "闭包大小（tar）", "MiB", true, float64(s.ClosureBytes)/(1<<20))
@@ -522,6 +687,11 @@ func (b *bench) phaseBuild() error {
 		b.add(g, "dedup", "去重率：新增 jq 的组合实际下载 / 闭包大小", "%", true,
 			100*float64(o4.Stats.FetchedBytes)/float64(o4.Stats.ClosureBytes)).Note =
 			fmt.Sprintf("下载 %.1f MiB / 闭包 %.1f MiB", float64(o4.Stats.FetchedBytes)/(1<<20), float64(o4.Stats.ClosureBytes)/(1<<20))
+	}
+	// the incremental warm is sampled with three combos that each add one
+	// small package (jq above, hello above, and tree here)
+	if _, _, err := b.build("tree", b.writeConfig("tree", cfgOpts{extra: []string{"nix:tree"}, env: map[string]string{"VARIANT": "tree"}})); err != nil {
+		b.res.Notes = append(b.res.Notes, fmt.Sprintf("build of the nix:tree combo failed, the incremental warm has fewer samples: %v", err))
 	}
 	// artifact sizes
 	sizes := map[string]float64{}
@@ -758,6 +928,14 @@ type warmOut struct {
 
 func (b *bench) phaseWarm() error {
 	const g = "2-warm"
+	// Write back what the build and the VM boot left dirty before anything
+	// is measured. On the native backend the agent's Dirty is the host's
+	// global one, with the fresh build artifacts (600+ MiB) among it; the
+	// dirty metric of the start phase should show what the warm itself
+	// leaves behind.
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		return err
+	}
 	before, _ := b.stats()
 	var w warmOut
 	wall, err := b.oarJSON(&w, "--bundle", b.digests["a"], "warm")
@@ -776,11 +954,32 @@ func (b *bench) phaseWarm() error {
 	}
 	b.add(g, "cold.mbps", "冷预热吞吐", "MiB/s", false, float64(w.Bytes)/(1<<20)/wall.Seconds())
 	b.add(g, "cold.fps", "冷预热文件处理速率", "文件/s", false, float64(w.Files)/wall.Seconds())
-	var wb warmOut
-	wall, err = b.oarJSON(&wb, "--bundle", b.digests["b"], "warm")
-	if err == nil {
-		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
-			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.View/1e6, wb.Flush/1e6, wb.Duration/1e6)
+	// incremental warm: combos that each add one small package to what the
+	// guest already has. Three of them (a different package each), so the
+	// metric has a p50 and a p99 instead of one sample.
+	var incr []float64
+	var incrNote string
+	var others []string
+	for _, c := range []struct{ combo, pkg string }{{"b", "jq"}, {"hello", "hello"}, {"tree", "tree"}} {
+		if b.digests[c.combo] == "" {
+			continue // its build failed (reported in the notes)
+		}
+		var wi warmOut
+		d, err := b.oarJSON(&wi, "--bundle", b.digests[c.combo], "warm")
+		if err != nil {
+			break
+		}
+		incr = append(incr, ms(d))
+		if len(incr) == 1 {
+			incrNote = fmt.Sprintf("第一个（nix:%s）：上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
+				c.pkg, wi.Uploaded, float64(wi.Bytes)/(1<<20), wi.Status/1e6, wi.GuestTime/1e6, wi.Precompose/1e6, wi.View/1e6, wi.Flush/1e6, wi.Duration/1e6)
+		} else {
+			others = append(others, fmt.Sprintf("nix:%s：上传 %d 个产物 %.2f MiB（视图 %.1f ms，写回 %.1f ms）", c.pkg, wi.Uploaded, float64(wi.Bytes)/(1<<20), wi.View/1e6, wi.Flush/1e6))
+		}
+	}
+	if len(incr) > 0 {
+		b.add(g, "incr", "增量预热（只多一个小包的组合：nix:jq / nix:hello / nix:tree）", "ms", true, incr...).Note =
+			strings.Join(append([]string{incrNote}, others...), "；")
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "stop-a", "stop-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if b.digests[name] == "" {
@@ -811,6 +1010,13 @@ type runOut struct {
 		Cached    bool            `json:"cached"`
 		Timings   struct {
 			Compose, StoreView, Instantiate, Create, Start, Ready, StopOld, Downtime, Drain, Snapshot, Restore, Total float64
+			// what the agent counted over the request: the runc child
+			// processes it started, and the CPU time (ns) of the agent
+			// process plus its children. Zero from agents that do not
+			// report them.
+			RuncExecs int     `json:"runcExecs"`
+			CPUUser   float64 `json:"cpuUser"`
+			CPUSys    float64 `json:"cpuSys"`
 		} `json:"timings"`
 		Replaced      string `json:"replaced"`
 		Restored      bool   `json:"restored"`
@@ -825,6 +1031,43 @@ func (b *bench) run(name, bundle string) (*runOut, time.Duration, error) {
 	var r runOut
 	d, err := b.oarJSON(&r, "--bundle", bundle, "run", "--name", name)
 	return &r, d, err
+}
+
+// execCPU collects what the agent reports about its own work per request:
+// the runc processes it started and the CPU time (user + system, the agent
+// process plus its children) it used. The counts do not move with runner
+// noise, and CPU time is steadier than wall time. Zero means an agent that
+// does not report them (a real request always starts a runc process), so
+// such a request adds no sample.
+type execCPU struct {
+	execs, cpu, user, sys []float64
+}
+
+func (e *execCPU) observe(r *runOut) {
+	t := r.Result.Timings
+	if t.RuncExecs > 0 {
+		e.execs = append(e.execs, float64(t.RuncExecs))
+	}
+	if t.CPUUser+t.CPUSys > 0 {
+		e.cpu = append(e.cpu, (t.CPUUser+t.CPUSys)/1e6)
+		e.user = append(e.user, t.CPUUser/1e6)
+		e.sys = append(e.sys, t.CPUSys/1e6)
+	}
+}
+
+// record adds the two metrics, n/a when no request reported them.
+func (e *execCPU) record(b *bench, g, execsKey, execsName, cpuKey, cpuName string) {
+	if len(e.execs) > 0 {
+		b.add(g, execsKey, execsName, "个", true, e.execs...).Note = "agent 在这次请求里启动的 runc 进程数（create、start、state 等）"
+	} else {
+		b.na(g, execsKey, execsName, "agent 没有上报 runc 进程数（旧版 agent）")
+	}
+	if len(e.cpu) > 0 {
+		b.add(g, cpuKey, cpuName, "ms", true, e.cpu...).Note =
+			fmt.Sprintf("agent 进程及其 runc 子进程在这次请求期间的 CPU 时间；中位数 user %.1f + sys %.1f ms", median(e.user), median(e.sys))
+	} else {
+		b.na(g, cpuKey, cpuName, "agent 没有上报 CPU 时间（旧版 agent）")
+	}
 }
 
 // rm stops and deletes a container, forcing deletion if a graceful stop
@@ -854,7 +1097,8 @@ func (b *bench) phaseStart() error {
 	const g = "4-start"
 	pre, err := b.stats()
 	if err == nil {
-		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(pre.Dirty+pre.Writeback)/(1<<20))
+		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(pre.Dirty+pre.Writeback)/(1<<20)).Note =
+			"预热开始前做过一次 sync，所以这里只是预热自己写入后还没写回的数据，不含构建产物（native 的 Dirty 是宿主机全局值）"
 	}
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
@@ -897,6 +1141,7 @@ func (b *bench) phaseStart() error {
 		n = 30
 	}
 	var e2e, compose, inst, create, start, total []float64
+	var ec execCPU
 	for i := 0; i < n; i++ {
 		r, wall, err := b.run("s", b.digests["idle"])
 		if err != nil {
@@ -909,6 +1154,7 @@ func (b *bench) phaseStart() error {
 		create = append(create, t.Create/1e6)
 		start = append(start, t.Start/1e6)
 		total = append(total, t.Total/1e6)
+		ec.observe(r)
 		b.rm("s")
 	}
 	b.add(g, "e2e", "端到端启动（热，CLI 墙钟）", "ms", true, e2e...)
@@ -917,6 +1163,7 @@ func (b *bench) phaseStart() error {
 	b.add(g, "instantiate", "　实例化（overlay + config.json）", "ms", true, inst...)
 	b.add(g, "create", "　runc create", "ms", true, create...)
 	b.add(g, "start", "　runc start", "ms", true, start...)
+	ec.record(b, g, "execs", "每次启动的 runc 子进程数", "cpu", "每次启动 agent 侧 CPU 时间（含 runc 子进程）")
 	// readiness for a service with a readiness check
 	var ready []float64
 	for i := 0; i < 5; i++ {
@@ -1134,8 +1381,29 @@ func (b *bench) phaseRuntime() error {
 
 // ---- phase 7: density ----
 
+// noteNativeLimits says, on the native backend, that --cpus and --memory do
+// not apply: the agent runs on the whole host, so the concurrency and density
+// numbers cannot be compared with the VM backends' 2 vCPUs / 4 GiB.
+func (b *bench) noteNativeLimits(g string) {
+	if b.backend != "native" {
+		return
+	}
+	note := fmt.Sprintf("native 后端不限制 CPU/内存：宿主机 %d 核", runtime.NumCPU())
+	for i := range b.res.Metrics {
+		m := &b.res.Metrics[i]
+		if m.Group != g || m.Status != "ok" {
+			continue
+		}
+		if m.Note != "" {
+			m.Note += "；"
+		}
+		m.Note += note
+	}
+}
+
 func (b *bench) phaseDensity() error {
 	const g = "7-density"
+	defer b.noteNativeLimits(g)
 	k := 10
 	if !b.quick {
 		k = 30
@@ -1305,7 +1573,7 @@ func (b *bench) probeSummaryFor(name string) (map[string]float64, error) {
 	return nil, fmt.Errorf("probe printed no summary")
 }
 
-func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down, stop []float64, err error) {
+func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall, guest, down, stop []float64, ec execCPU, err error) {
 	if _, _, err = b.run("svc", b.digests[a]); err != nil {
 		return
 	}
@@ -1334,6 +1602,7 @@ func (b *bench) switchSeries(strategy, a, bb string, n int, prepare bool) (wall,
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		down = append(down, r.Result.Timings.Downtime/1e6)
 		stop = append(stop, r.Result.Timings.StopOld/1e6)
+		ec.observe(&r)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1354,7 +1623,7 @@ func (b *bench) phaseSwitch() error {
 		{"replace", "a-plain", "b-plain", "replace", "replace", false},
 		{"overlap", "a", "b", "overlap + 预创建（prepare）", "prepared", true},
 	} {
-		wall, guest, down, stop, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
+		wall, guest, down, stop, ec, err := b.switchSeries(sc.strategy, sc.a, sc.b, n, sc.prepare)
 		if err != nil {
 			b.rm("svc")
 			b.rm("probe")
@@ -1371,6 +1640,7 @@ func (b *bench) phaseSwitch() error {
 		if sc.strategy == "replace" {
 			b.add(g, sc.key+".down", sc.label+"：服务端停机窗口", "ms", true, down...)
 		}
+		ec.record(b, g, sc.key+".execs", sc.label+"：每次切换的 runc 子进程数", sc.key+".cpu", sc.label+"：每次切换 agent 侧 CPU 时间（含 runc 子进程）")
 		total := sum["ok"] + sum["failed"]
 		b.add(g, sc.key+".failed", fmt.Sprintf("%s：客户端失败请求（%d 次切换）", sc.label, n), "个", true, sum["failed"]).Note =
 			fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
@@ -1497,6 +1767,7 @@ func (b *bench) ingressScenarios(n int) error {
 	}
 	time.Sleep(time.Second)
 	var wall, guest, drainT, stopT []float64
+	var ec execCPU
 	for i := 0; i < n; i++ {
 		target := "ing-b"
 		if i%2 == 1 {
@@ -1511,6 +1782,7 @@ func (b *bench) ingressScenarios(n int) error {
 		guest = append(guest, r.Result.Timings.Total/1e6)
 		drainT = append(drainT, r.Result.Timings.Drain/1e6)
 		stopT = append(stopT, r.Result.Timings.StopOld/1e6)
+		ec.observe(&r)
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1522,6 +1794,7 @@ func (b *bench) ingressScenarios(n int) error {
 	b.add(g, "ingress.guest", "入口代理切换：切换耗时（guest 内）", "ms", true, guest...)
 	b.add(g, "ingress.drain", "入口代理切换：旧实例排空在途连接", "ms", true, drainT...)
 	b.add(g, "ingress.stopold", "入口代理切换：等待旧实例退出（StopOld，guest 内）", "ms", true, stopT...)
+	ec.record(b, g, "ingress.execs", "入口代理切换：每次切换的 runc 子进程数", "ingress.cpu", "入口代理切换：每次切换 agent 侧 CPU 时间（含 runc 子进程）")
 	total := sum["ok"] + sum["failed"]
 	b.add(g, "ingress.failed", fmt.Sprintf("入口代理切换：客户端失败请求（%d 次切换，无需 SO_REUSEPORT）", n), "个", true, sum["failed"]).Note =
 		fmt.Sprintf("共 %.0f 个请求，失败率 %.2f%%", total, 100*sum["failed"]/math.Max(total, 1))
