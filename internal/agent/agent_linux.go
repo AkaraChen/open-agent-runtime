@@ -950,7 +950,8 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	var last error
 	var logs logSearch
 	defer logs.close()
@@ -958,13 +959,13 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 		// PERF: the tcp and log probes cost microseconds (a dial to a port
 		// nobody listens on yet, the bytes the log gained), and so does the
 		// liveness check below, which reads runc's state files. They run
-		// every millisecond, so readiness is noticed within a millisecond of
-		// the application being ready. Each round used to be a `runc state`
-		// exec (4.6 ms on KVM, 100 ms on vz, 250 ms on TCG) plus a 10 ms
-		// sleep, which made readiness come in steps of 14.6 ms on KVM. The
-		// exec probe runs a process in the container each time and keeps
-		// its 10 ms.
-		pause := time.Millisecond
+		// every millisecond to begin with, so readiness is noticed within a
+		// millisecond of the application being ready. Each round used to be
+		// a `runc state` exec (4.6 ms on KVM, 100 ms on vz, 250 ms on TCG)
+		// plus a 10 ms sleep, which made readiness come in steps of 14.6 ms
+		// on KVM. The exec probe runs a process in the container each time
+		// and keeps its 10 ms.
+		pause := pollPause(time.Since(start))
 		switch {
 		case r.TCP != "":
 			c, err := net.DialTimeout("tcp", r.TCP, 200*time.Millisecond)
@@ -1001,6 +1002,17 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 		case <-time.After(pause):
 		}
 	}
+}
+
+// pollPause is the pause between two rounds of a cheap readiness probe, given
+// how long the application has been starting: a millisecond for the first 50
+// ms, where a late answer is a large share of the wait, then 2% of the time
+// waited so far, up to the 10 ms that rounds used to have. A round costs
+// about 100 to 200 microseconds of CPU, so polling every millisecond for as
+// long as a slow application takes would use a fifth of a core per waiting
+// container, which matters when many start at once on a couple of vCPUs.
+func pollPause(waited time.Duration) time.Duration {
+	return min(max(waited/50, time.Millisecond), 10*time.Millisecond)
 }
 
 // logSearch looks for a string in a log that grows. Every call continues

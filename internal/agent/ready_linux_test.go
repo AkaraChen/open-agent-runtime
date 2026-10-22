@@ -107,6 +107,34 @@ func TestLogSearch(t *testing.T) {
 	})
 }
 
+func TestPollPause(t *testing.T) {
+	ms := time.Millisecond
+	for waited, want := range map[time.Duration]time.Duration{
+		0:         ms,
+		ms:        ms,
+		49 * ms:   ms,
+		50 * ms:   ms,
+		99 * ms:   1980 * time.Microsecond,
+		100 * ms:  2 * ms,
+		250 * ms:  5 * ms,
+		499 * ms:  9980 * time.Microsecond,
+		500 * ms:  10 * ms,
+		time.Hour: 10 * ms,
+	} {
+		if got := pollPause(waited); got != want {
+			t.Errorf("after %s: pause %s, want %s", waited, got, want)
+		}
+	}
+	// a probe is never late by more than 2% of the wait (beyond the first
+	// millisecond) or by more than the 10 ms of the old loop
+	for waited := time.Duration(0); waited < 2*time.Second; waited += 137 * time.Microsecond {
+		p := pollPause(waited)
+		if p < ms || p > 10*ms || p > max(ms, waited/50) {
+			t.Fatalf("after %s: pause %s", waited, p)
+		}
+	}
+}
+
 // readyServer is a server whose runc is a fake that records its calls, with
 // a real process as the init of container "web-1".
 func readyServer(t *testing.T) (s *Server, in *instance, child interface{ Kill() error }, calls string) {
