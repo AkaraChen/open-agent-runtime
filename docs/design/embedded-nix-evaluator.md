@@ -234,6 +234,15 @@ directory sits in. Later builds at the same revision skip the download.
 disk per revision; the `fetchTarball` path before cost the same inside
 `/nix/store` or the Docker volume.
 
+The archive is 37,000 directories and 53,000 files, and extracting it was
+most of what a first build spent before the evaluator ran. It is a pipeline
+now (`internal/nixeval/extract.go`): one goroutine inflates the stream, one
+parses the tar and reads each file's content, and a few create the
+directories and write the files, with at most 64 MiB of content in flight.
+The result is that of extracting entry by entry: the same modes, links and
+last-entry-wins for a path named twice; an entry that would be written
+through a symlink of the archive is refused.
+
 The iets IR cache lives at `<cache>/iets/` so a second evaluation at the
 same revision compiles no nixpkgs file twice.
 

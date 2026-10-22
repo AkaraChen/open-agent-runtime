@@ -1,16 +1,12 @@
 package nixeval
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -113,74 +109,4 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 	}
 	fmt.Fprintf(log, "  %d files in %s\n", n, time.Since(start).Round(time.Millisecond))
 	return dir, nil
-}
-
-// extractTarGz writes a GitHub-style archive (one top-level directory) into
-// dst without that directory. Entries that would land outside dst are
-// refused. Symlinks are kept as they are: nothing here follows them.
-func extractTarGz(r io.Reader, dst string) (int, error) {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return 0, err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	files := 0
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return files, nil
-		}
-		if err != nil {
-			return files, err
-		}
-		if h.Name == "pax_global_header" {
-			continue
-		}
-		if path.IsAbs(h.Name) || slices.Contains(strings.Split(h.Name, "/"), "..") {
-			return files, fmt.Errorf("archive entry %q escapes the destination", h.Name)
-		}
-		_, rel, ok := strings.Cut(path.Clean(h.Name), "/")
-		if !ok || rel == "" || rel == "." {
-			continue // the top-level directory itself
-		}
-		target := filepath.Join(dst, filepath.FromSlash(rel))
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return files, err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
-			}
-			mode := os.FileMode(0o644)
-			if h.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-			if err != nil {
-				return files, err
-			}
-			_, err = io.Copy(f, tr)
-			if cerr := f.Close(); err == nil {
-				err = cerr
-			}
-			if err != nil {
-				return files, err
-			}
-			files++
-		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
-			}
-			_ = os.Remove(target)
-			if err := os.Symlink(h.Linkname, target); err != nil {
-				return files, err
-			}
-			files++
-		default:
-			// hard links and devices do not occur in a source archive
-		}
-	}
 }
