@@ -448,6 +448,23 @@ func (b *bench) phaseEnv() error {
 		cpu = append(cpu, ms(time.Since(t)))
 	}
 	b.add(g, "cpu", "宿主机单核 CPU（sha256 64 MiB）", "ms", true, cpu...)
+	// file metadata operations are what unpacking and view building spend
+	// their time on; the sha256 loop does not exercise them, and hosts with
+	// the same CPU model can still differ here
+	const metaName = "宿主机元数据操作（创建+stat+删除 5000 个文件）"
+	var meta []float64
+	for i := 0; i < 3; i++ {
+		d, err := metadataOps(5000)
+		if err != nil {
+			meta = nil
+			b.na(g, "meta", metaName, err.Error())
+			break
+		}
+		meta = append(meta, ms(d))
+	}
+	if meta != nil {
+		b.add(g, "meta", metaName, "ms", true, meta...).Note = "5000 个 1 字节文件，在 os.TempDir() 下新建的目录里"
+	}
 	f, err := os.CreateTemp(b.art, "disk-")
 	if err == nil {
 		t := time.Now()
@@ -461,6 +478,37 @@ func (b *bench) phaseEnv() error {
 		b.add(g, "disk", "宿主机磁盘顺序写（256 MiB + fsync）", "MiB/s", false, 256/d.Seconds())
 	}
 	return nil
+}
+
+// metadataOps creates, stats and removes n one-byte files in a fresh
+// directory under os.TempDir() and returns how long that took.
+func metadataOps(n int) (time.Duration, error) {
+	dir, err := os.MkdirTemp("", "oar-bench-meta-")
+	if err != nil {
+		return 0, err
+	}
+	defer os.RemoveAll(dir)
+	names := make([]string, n)
+	for i := range names {
+		names[i] = filepath.Join(dir, "f"+strconv.Itoa(i))
+	}
+	t := time.Now()
+	for _, p := range names {
+		if err := os.WriteFile(p, []byte{'x'}, 0o644); err != nil {
+			return 0, err
+		}
+	}
+	for _, p := range names {
+		if _, err := os.Stat(p); err != nil {
+			return 0, err
+		}
+	}
+	for _, p := range names {
+		if err := os.Remove(p); err != nil {
+			return 0, err
+		}
+	}
+	return time.Since(t), nil
 }
 
 // ---- phase 1: build ----
@@ -1134,8 +1182,29 @@ func (b *bench) phaseRuntime() error {
 
 // ---- phase 7: density ----
 
+// noteNativeLimits says, on the native backend, that --cpus and --memory do
+// not apply: the agent runs on the whole host, so the concurrency and density
+// numbers cannot be compared with the VM backends' 2 vCPUs / 4 GiB.
+func (b *bench) noteNativeLimits(g string) {
+	if b.backend != "native" {
+		return
+	}
+	note := fmt.Sprintf("native 后端不限制 CPU/内存：宿主机 %d 核", runtime.NumCPU())
+	for i := range b.res.Metrics {
+		m := &b.res.Metrics[i]
+		if m.Group != g || m.Status != "ok" {
+			continue
+		}
+		if m.Note != "" {
+			m.Note += "；"
+		}
+		m.Note += note
+	}
+}
+
 func (b *bench) phaseDensity() error {
 	const g = "7-density"
+	defer b.noteNativeLimits(g)
 	k := 10
 	if !b.quick {
 		k = 30
