@@ -1,17 +1,14 @@
 package nixeval
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/spec"
@@ -52,7 +49,9 @@ func IRCacheDir() string { return filepath.Join(CacheDir(), "iets") }
 // Source returns the checkout named by ref: a directory as it is, or a
 // nixpkgs commit downloaded once into SourceDir. The download is extracted
 // next to its final place and renamed into it, so a directory that exists
-// is complete.
+// is complete. Callers in one process that ask for the same commit at once
+// share one download; processes that do so download it each, and the first
+// to finish publishes it.
 func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, error) {
 	if log == nil {
 		log = io.Discard
@@ -68,7 +67,21 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 		return dir, nil
 	}
 	dir := SourceDir(ref)
-	if _, err := os.Stat(filepath.Join(dir, "default.nix")); err == nil {
+	if sourceReady(dir) {
+		return dir, nil
+	}
+	// PERF: the build can ask for the same tree from several places at once
+	// (each platform's nix stage, and the nix-eval child it starts), and
+	// fetching it is 51 MB of download and 250 MB of tar. One caller per
+	// directory fetches; the others wait for it and find the tree in place,
+	// instead of downloading it again. A caller whose context ends stops
+	// waiting, and a failed fetch leaves the next caller to try again.
+	unlock, err := lockSource(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if sourceReady(dir) {
 		return dir, nil
 	}
 	if mirror == "" {
@@ -106,7 +119,7 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 	}
 	if err := os.Rename(tmp, dir); err != nil {
 		// another process finished first
-		if _, serr := os.Stat(filepath.Join(dir, "default.nix")); serr == nil {
+		if sourceReady(dir) {
 			return dir, nil
 		}
 		return "", err
@@ -115,72 +128,27 @@ func Source(ctx context.Context, ref, mirror string, log io.Writer) (string, err
 	return dir, nil
 }
 
-// extractTarGz writes a GitHub-style archive (one top-level directory) into
-// dst without that directory. Entries that would land outside dst are
-// refused. Symlinks are kept as they are: nothing here follows them.
-func extractTarGz(r io.Reader, dst string) (int, error) {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return 0, err
+// sourceReady reports whether dir holds a complete checkout: it is renamed
+// into place only after it was extracted.
+func sourceReady(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "default.nix"))
+	return err == nil
+}
+
+// sourceLocks holds one lock per checkout directory: a channel with room for
+// one token, which unlike a mutex can be waited on together with a context.
+var sourceLocks sync.Map
+
+func lockSource(ctx context.Context, dir string) (unlock func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err // select would pick at random between a free lock and a done context
 	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	files := 0
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return files, nil
-		}
-		if err != nil {
-			return files, err
-		}
-		if h.Name == "pax_global_header" {
-			continue
-		}
-		if path.IsAbs(h.Name) || slices.Contains(strings.Split(h.Name, "/"), "..") {
-			return files, fmt.Errorf("archive entry %q escapes the destination", h.Name)
-		}
-		_, rel, ok := strings.Cut(path.Clean(h.Name), "/")
-		if !ok || rel == "" || rel == "." {
-			continue // the top-level directory itself
-		}
-		target := filepath.Join(dst, filepath.FromSlash(rel))
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return files, err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
-			}
-			mode := os.FileMode(0o644)
-			if h.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-			if err != nil {
-				return files, err
-			}
-			_, err = io.Copy(f, tr)
-			if cerr := f.Close(); err == nil {
-				err = cerr
-			}
-			if err != nil {
-				return files, err
-			}
-			files++
-		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
-			}
-			_ = os.Remove(target)
-			if err := os.Symlink(h.Linkname, target); err != nil {
-				return files, err
-			}
-			files++
-		default:
-			// hard links and devices do not occur in a source archive
-		}
+	v, _ := sourceLocks.LoadOrStore(dir, make(chan struct{}, 1))
+	lock := v.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+		return func() { <-lock }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
