@@ -688,6 +688,11 @@ func (b *bench) phaseBuild() error {
 			100*float64(o4.Stats.FetchedBytes)/float64(o4.Stats.ClosureBytes)).Note =
 			fmt.Sprintf("下载 %.1f MiB / 闭包 %.1f MiB", float64(o4.Stats.FetchedBytes)/(1<<20), float64(o4.Stats.ClosureBytes)/(1<<20))
 	}
+	// the incremental warm is sampled with three combos that each add one
+	// small package (jq above, hello above, and tree here)
+	if _, _, err := b.build("tree", b.writeConfig("tree", cfgOpts{extra: []string{"nix:tree"}, env: map[string]string{"VARIANT": "tree"}})); err != nil {
+		b.res.Notes = append(b.res.Notes, fmt.Sprintf("build of the nix:tree combo failed, the incremental warm has fewer samples: %v", err))
+	}
 	// artifact sizes
 	sizes := map[string]float64{}
 	filepath.WalkDir(b.art, func(p string, d fs.DirEntry, err error) error {
@@ -923,6 +928,14 @@ type warmOut struct {
 
 func (b *bench) phaseWarm() error {
 	const g = "2-warm"
+	// Write back what the build and the VM boot left dirty before anything
+	// is measured. On the native backend the agent's Dirty is the host's
+	// global one, with the fresh build artifacts (600+ MiB) among it; the
+	// dirty metric of the start phase should show what the warm itself
+	// leaves behind.
+	if _, err := b.statsArgs(proto.StatsArgs{Sync: true}); err != nil {
+		return err
+	}
 	before, _ := b.stats()
 	var w warmOut
 	wall, err := b.oarJSON(&w, "--bundle", b.digests["a"], "warm")
@@ -941,11 +954,32 @@ func (b *bench) phaseWarm() error {
 	}
 	b.add(g, "cold.mbps", "冷预热吞吐", "MiB/s", false, float64(w.Bytes)/(1<<20)/wall.Seconds())
 	b.add(g, "cold.fps", "冷预热文件处理速率", "文件/s", false, float64(w.Files)/wall.Seconds())
-	var wb warmOut
-	wall, err = b.oarJSON(&wb, "--bundle", b.digests["b"], "warm")
-	if err == nil {
-		b.add(g, "incr", "增量预热（只多 nix:jq 的组合）", "ms", true, ms(wall)).Note = fmt.Sprintf("上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
-			wb.Uploaded, float64(wb.Bytes)/(1<<20), wb.Status/1e6, wb.GuestTime/1e6, wb.Precompose/1e6, wb.View/1e6, wb.Flush/1e6, wb.Duration/1e6)
+	// incremental warm: combos that each add one small package to what the
+	// guest already has. Three of them (a different package each), so the
+	// metric has a p50 and a p99 instead of one sample.
+	var incr []float64
+	var incrNote string
+	var others []string
+	for _, c := range []struct{ combo, pkg string }{{"b", "jq"}, {"hello", "hello"}, {"tree", "tree"}} {
+		if b.digests[c.combo] == "" {
+			continue // its build failed (reported in the notes)
+		}
+		var wi warmOut
+		d, err := b.oarJSON(&wi, "--bundle", b.digests[c.combo], "warm")
+		if err != nil {
+			break
+		}
+		incr = append(incr, ms(d))
+		if len(incr) == 1 {
+			incrNote = fmt.Sprintf("第一个（nix:%s）：上传 %d 个产物，%.2f MiB；CLI 内：查询缺失 %.1f ms，guest 解包合计 %.1f ms，precompose %.1f ms（视图 %.1f ms，写回 %.1f ms），CLI 总计 %.1f ms",
+				c.pkg, wi.Uploaded, float64(wi.Bytes)/(1<<20), wi.Status/1e6, wi.GuestTime/1e6, wi.Precompose/1e6, wi.View/1e6, wi.Flush/1e6, wi.Duration/1e6)
+		} else {
+			others = append(others, fmt.Sprintf("nix:%s：上传 %d 个产物 %.2f MiB（视图 %.1f ms，写回 %.1f ms）", c.pkg, wi.Uploaded, float64(wi.Bytes)/(1<<20), wi.View/1e6, wi.Flush/1e6))
+		}
+	}
+	if len(incr) > 0 {
+		b.add(g, "incr", "增量预热（只多一个小包的组合：nix:jq / nix:hello / nix:tree）", "ms", true, incr...).Note =
+			strings.Join(append([]string{incrNote}, others...), "；")
 	}
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "stop-a", "stop-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if b.digests[name] == "" {
@@ -1019,7 +1053,8 @@ func (b *bench) phaseStart() error {
 	const g = "4-start"
 	pre, err := b.stats()
 	if err == nil {
-		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(pre.Dirty+pre.Writeback)/(1<<20))
+		b.add(g, "dirty", "首次启动前待写回的数据（Dirty + Writeback）", "MiB", true, float64(pre.Dirty+pre.Writeback)/(1<<20)).Note =
+			"预热开始前做过一次 sync，所以这里只是预热自己写入后还没写回的数据，不含构建产物（native 的 Dirty 是宿主机全局值）"
 	}
 	first, wall, err := b.run("s0", b.digests["idle"])
 	if err != nil {
