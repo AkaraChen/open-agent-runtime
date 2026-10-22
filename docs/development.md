@@ -103,6 +103,10 @@ What can be set, when the defaults do not fit:
   `boot-profile` workflow uses it for `initcall_debug`); `oar vm profile --kind cpu --seconds 10 -o cpu.pprof`
   (hidden) saves a Go profile of the guest agent for `go tool pprof` (kinds: cpu, heap, allocs,
   goroutine, block, mutex, trace).
+  `boot-profile` workflow uses it for `initcall_debug`). With `oar.dumpkmsg=1` the agent writes the
+  kernel log (`/dev/kmsg`) to the console after the host's first request, so a boot can be profiled
+  without printing the initcalls while it runs (`log_buf_len=4M` keeps all of them in the ring
+  buffer).
 
 The Nix evaluator is the first available of the embedded one, `nix-instantiate` and Docker; if the
 embedded evaluator crashes, the build continues with the next available one.
