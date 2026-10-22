@@ -133,6 +133,7 @@ func (s *Server) Handle(ctx context.Context, req *proto.Request, body io.Reader,
 // polls, uploads); the others are reported when they exceed slowRequest.
 var longRunning = map[string]bool{
 	proto.OpLogs: true, proto.OpExec: true, proto.OpDial: true, proto.OpIngress: true, proto.OpWarmPut: true,
+	proto.OpDebugProfile: true,
 }
 
 const slowRequest = 60 * time.Second
@@ -318,6 +319,12 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		s.prepareView(compose.StoreLayers(s.layout, a.Lock), s.layout.StoreView(compose.ClosureKey(a.Lock)))
 		return map[string]string{}, nil
+	case proto.OpDebugProfile:
+		var a proto.DebugProfileArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return nil, debugProfile(ctx, a, rs)
 	case proto.OpShutdown:
 		if s.cfg.Shutdown == nil {
 			return nil, fmt.Errorf("shutdown is only supported inside the guest VM")

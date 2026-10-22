@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,8 +131,74 @@ func vmCmd(g *globalOpts) *cobra.Command {
 			return nil
 		},
 	}
-	c.AddCommand(start, stop, status, supervise, backends, statsCmd)
+	var profKind, profOut string
+	var profSeconds int
+	profile := &cobra.Command{
+		Use:    "profile",
+		Short:  "Fetch a Go runtime profile of the guest agent",
+		Hidden: true,
+		Long: "Fetches a runtime/pprof profile of the guest agent process (the supervisor on the native backend)\n" +
+			"and writes it to a file. Read it with `go tool pprof FILE`; --kind trace is an execution trace\n" +
+			"for `go tool trace FILE`.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return fetchProfile(cmd.Context(), g, profKind, profSeconds, profOut)
+		},
+	}
+	profile.Flags().StringVar(&profKind, "kind", proto.ProfileCPU, "cpu, heap, allocs, goroutine, block, mutex or trace")
+	profile.Flags().IntVar(&profSeconds, "seconds", 10, "how long cpu, trace, block and mutex sample (at most 120)")
+	profile.Flags().StringVarP(&profOut, "output", "o", "", "file to write the profile to (- for stdout)")
+	profile.MarkFlagRequired("output")
+	c.AddCommand(start, stop, status, supervise, backends, statsCmd, profile)
 	return c
+}
+
+// fetchProfile saves a runtime profile of the guest agent (see
+// proto.DebugProfileArgs) to path, or to stdout for "-".
+func fetchProfile(ctx context.Context, g *globalOpts, kind string, seconds int, path string) error {
+	cl, err := connect(ctx, g)
+	if err != nil {
+		return err
+	}
+	out := os.Stdout
+	if path != "-" {
+		if out, err = os.Create(path); err != nil {
+			return err
+		}
+	}
+	w := &countWriter{w: out}
+	err = cl.CallBody(ctx, proto.OpDebugProfile, proto.DebugProfileArgs{Kind: kind, Seconds: seconds}, nil, 0, nil, w)
+	if path != "-" {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err == nil && w.n == 0 {
+		err = fmt.Errorf("the agent sent an empty %s profile", kind)
+	}
+	if err != nil {
+		if path != "-" {
+			os.Remove(path)
+		}
+		return err
+	}
+	if path == "-" {
+		path = "stdout"
+	}
+	fmt.Fprintf(os.Stderr, "%s profile: %s -> %s\n", kind, human(w.n), path)
+	return nil
+}
+
+// countWriter counts the bytes written through it.
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func addStartFlags(c *cobra.Command, o *vmStartOpts) {

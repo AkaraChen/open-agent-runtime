@@ -72,6 +72,31 @@ type StatsResult struct {
 	Boot map[string]float64 `json:"boot,omitempty"`
 }
 
+// Profile kinds of debug.profile.
+const (
+	ProfileCPU       = "cpu"
+	ProfileHeap      = "heap"
+	ProfileAllocs    = "allocs"
+	ProfileGoroutine = "goroutine"
+	ProfileBlock     = "block"
+	ProfileMutex     = "mutex"
+	ProfileTrace     = "trace"
+)
+
+// DebugProfileArgs selects a profile of the agent process. The body of the
+// response is the profile as runtime/pprof writes it (gzipped protobuf,
+// read with `go tool pprof`), or the execution trace for ProfileTrace
+// (`go tool trace`).
+type DebugProfileArgs struct {
+	// Kind is one of the Profile* kinds.
+	Kind string `json:"kind"`
+	// Seconds is how long the kinds that sample over time run: cpu, trace,
+	// block and mutex (default 10, at most 120). Block and mutex profiling
+	// is off in the Go runtime until enabled, so the agent enables it for
+	// that long. The other kinds are instantaneous and ignore it.
+	Seconds int `json:"seconds"`
+}
+
 // WarmStatusArgs asks which items are missing.
 type WarmStatusArgs struct {
 	Items []WarmItem `json:"items"`
