@@ -77,6 +77,7 @@ func (s *Server) stats() proto.StatsResult {
 	s.groups.mu.Lock()
 	res.StoreViews = len(s.groups.mounted)
 	s.groups.mu.Unlock()
+	res.ViewSteals, res.ViewRebuilds = int(s.groups.steals.Load()), int(s.groups.rebuilds.Load())
 	if list, err := s.loadInstances(); err == nil {
 		res.Instances = len(list)
 	}
