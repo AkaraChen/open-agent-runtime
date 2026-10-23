@@ -1,0 +1,41 @@
+{
+  "method": "Same config, components and platform (linux/arm64) as the benchmark's build phase, fresh artifact directory. The base image is served from a local registry (localhost:5001) and the 120-path Nix closure from a local HTTP mirror (127.0.0.1:8899) populated from cache.nixos.org, so no WAN download is on the critical path. Stats are from `oar --json build`; wall includes the CLI process.",
+  "config": "runtime.base: localhost:5001/debian:trixie-slim; runtime.substituters: [http://127.0.0.1:8899]; components: nodejs_22, python313, git, binary:my-agent",
+  "networked": [
+    {
+      "wallSeconds": 22.44,
+      "statsMs": {
+        "total": 22400,
+        "base": 22399,
+        "eval": 447,
+        "fetch": 19820,
+        "components": 427,
+        "componentBuild": 410
+      }
+    }
+  ],
+  "wanExcluded": [
+    {
+      "wallSeconds": 1.76,
+      "statsMs": {
+        "total": 1717,
+        "base": 1515,
+        "eval": 331,
+        "fetch": 1382,
+        "components": 1230,
+        "componentBuild": 1123
+      }
+    },
+    {
+      "wallSeconds": 1.75,
+      "statsMs": {
+        "total": 1708,
+        "base": 1550,
+        "eval": 309,
+        "fetch": 1395,
+        "components": 1315,
+        "componentBuild": 1246
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Benchmark 第 15 步：main（第二轮优化合并后）
 
-> 本报告由 `hack/bench` 自动生成，原始数据见同目录的 `results-*.json`（CI run 39936819947，commit `bdf1157`，即第二轮优化合并后的 main）。括号里的变化是相对[第 14 步](../14-round2/README.md)（同一套代码在集成分支上的运行，`f26a053`，代码树相同），所以这里的差异只反映 runner：kvm 这次在 EPYC 9V45 上，第 14 步在 EPYC 7763 上。README 的性能表取自本目录。
+> 本报告由 `hack/bench` 自动生成，原始数据见同目录的 `results-*.json`（CI run 39936819947，commit `bdf1157`，即第二轮优化合并后的 main）。括号里的变化是相对[第 14 步](../14-round2/README.md)（同一套代码在集成分支上的运行，`f26a053`，代码树相同），所以这里的差异只反映 runner：kvm 这次在 EPYC 9V45 上，第 14 步在 EPYC 7763 上。README 性能表的 Linux 列取自本目录；macOS 列改由[第 16 步](../16-local-m3/README.md)的本机 Apple M3 实测提供。
 
 
 ## 测试环境
