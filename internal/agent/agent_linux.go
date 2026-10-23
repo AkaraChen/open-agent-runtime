@@ -804,6 +804,12 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	if err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
+	// The view is built here to time it apart from the instantiation. It is
+	// held from this first request: instantiate writes the instance's marker,
+	// which protects the view, only after it has made the instance directory,
+	// and marks the view used when it asks for it again.
+	release := s.holdView(res.Bundle.StoreView)
+	defer release()
 	tView := time.Now()
 	if err := s.ensureStoreView(res.Bundle); err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
@@ -1048,7 +1054,9 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 	} else if err := os.MkdirAll(filepath.Join(in.dir, "upper"), 0o755); err != nil {
 		return nil, err
 	}
-	if err := s.ensureStoreView(b); err != nil {
+	// the view is marked used here, with the instance's marker already in
+	// place: createInstance, prepare and restore all come through this call
+	if err := s.useStoreView(b); err != nil {
 		os.RemoveAll(in.dir)
 		return nil, err
 	}
