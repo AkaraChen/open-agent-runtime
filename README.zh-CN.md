@@ -41,14 +41,14 @@ process:
 
 ```console
 $ oar build     # 编译一次
-$ oar run       # 约 100 毫秒启动
+$ oar run       # 约 40 毫秒启动
 $ oar reload    # 切换到新环境，不停机
 ```
 
 ## 为什么选择 open-agent-runtime？
 
 - **快在关键路径上。** 依赖解析、下载、打包全部在构建阶段完成。启动或切换环境时只是挂载已缓存的层，然后调用 `runc`，
-  端到端约 100 毫秒。
+  在 Linux 上端到端约 40 毫秒（见[性能](#性能)）。
 - **天然可复现。** 基础镜像按 digest 锁定，软件包按 commit 锁定。同一组部件永远得到同一个 bundle digest 和同一个运行环境，
   与书写顺序无关。
 - **按需组合，而非一整块镜像。** 发行版基础镜像、nixpkgs 中超过 10 万个软件包、你自己的二进制、目录或直接写在配置里的文件，
@@ -89,6 +89,29 @@ flowchart LR
 | **不停机切换** | `overlap` / `replace` 两种切换策略，配合就绪检查与自动回滚 |
 | **离线分发** | 按 digest 启动、切换已编译的环境，无需配置文件、编译器或网络 |
 | **环境隔离** | 每个容器只能看到自己依赖的 `/nix/store` 路径，且全部只读 |
+
+## 性能
+
+数据来自 GitHub 托管的 CI runner 上的 `hack/bench`（Linux 上 4 个 vCPU；guest 虚拟机分到 2 个 vCPU、4 GiB），
+测的是示例环境：Debian、Node.js、Python、git 加一个自定义二进制，共 120 个 Nix store path、553 MiB。表中是中位数。
+完整结果（含 p99 和每一步的拆分）见 [docs/benchmarks/15-main](docs/benchmarks/15-main/README.md)。
+
+| | Linux，native | Linux，KVM | macOS，VZ ¹ | macOS，QEMU ² |
+|---|---|---|---|---|
+| 启动已预热的环境（`oar run`） | 37 ms | 36 ms | 213 ms | 474 ms |
+| 经入口代理切换版本，0 个请求失败 | 61 ms | 59 ms | 444 ms | 592 ms |
+| 切换到预创建的实例 | 38 ms | 37 ms | 272 ms | 285 ms |
+| 慢启动应用切换到热备 | 13 ms | 13 ms | 87 ms | 62 ms |
+| 从快照恢复应用 | 60 ms | 47 ms | 352 ms | — |
+| reload 到多一个新包的环境（含上传） | 49 ms | 49 ms | 746 ms | 587 ms |
+| 同时启动 10 个环境，单个耗时 | 167 ms | 164 ms | 1.4 s | 2.5 s |
+| 启动常驻虚拟机 | — | 204 ms | 10.2 s | 2.7 s |
+| 把整个环境预热进虚拟机（553 MiB） | 1.4 s | 1.4 s | 44 s | 41 s |
+| 从零构建（nixpkgs 源码已缓存） | 2.1 s | 1.5 s | 8.8 s | 4.7 s |
+
+¹ Intel Mac runner，虚拟机跑在嵌套虚拟化里，启动时间大部分花在 VZ 加载内核上。
+² CI 上的 Apple Silicon 没有硬件虚拟化，arm64 guest 用 TCG 模拟运行。
+两列在真机上预计都会快很多，但还没有实测。
 
 ## 快速开始
 

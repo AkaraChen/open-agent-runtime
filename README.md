@@ -43,15 +43,15 @@ process:
 
 ```console
 $ oar build     # compile once
-$ oar run       # start in ~100 ms
+$ oar run       # start in ~40 ms
 $ oar reload    # switch to a new environment with no downtime
 ```
 
 ## Why open-agent-runtime?
 
 - **Fast where it matters.** All resolution, downloading and packaging happens at build time.
-  Starting or switching an environment only mounts cached layers and calls `runc`: about 100 ms end
-  to end.
+  Starting or switching an environment only mounts cached layers and calls `runc`: about 40 ms end
+  to end on Linux (see [Performance](#performance)).
 - **Reproducible by construction.** Base images are pinned by digest and packages by commit. The same
   set of components always produces the same bundle digest and the same environment, regardless of
   the order you list them in.
@@ -99,6 +99,31 @@ Read the [architecture guide](docs/architecture.md) for the full design.
 | **Zero-downtime reloads** | `overlap` and `replace` strategies, readiness checks, automatic rollback |
 | **Offline distribution** | Start and switch compiled environments by digest: no config, compilers or network needed |
 | **Isolated environments** | Each container sees only its own `/nix/store` closure, read-only |
+
+## Performance
+
+Measured on GitHub-hosted CI runners with `hack/bench` (4 vCPUs on Linux; the guest VM gets 2 vCPUs
+and 4 GiB), on the example environment: Debian, Node.js, Python, git and a custom binary, 120 Nix
+store paths, 553 MiB. Medians. Full results, including p99 and every intermediate step, are in
+[docs/benchmarks/15-main](docs/benchmarks/15-main/README.md).
+
+| | Linux, native | Linux, KVM | macOS, VZ ¹ | macOS, QEMU ² |
+|---|---|---|---|---|
+| Start a warm environment (`oar run`) | 37 ms | 36 ms | 213 ms | 474 ms |
+| Switch versions through the ingress proxy, 0 dropped requests | 61 ms | 59 ms | 444 ms | 592 ms |
+| Switch to a pre-created instance | 38 ms | 37 ms | 272 ms | 285 ms |
+| Switch a slow-starting app to its hot standby | 13 ms | 13 ms | 87 ms | 62 ms |
+| Restore an app from its snapshot | 60 ms | 47 ms | 352 ms | — |
+| Reload to an environment with one new package (upload included) | 49 ms | 49 ms | 746 ms | 587 ms |
+| 10 environments started at once, each | 167 ms | 164 ms | 1.4 s | 2.5 s |
+| Boot the resident VM | — | 204 ms | 10.2 s | 2.7 s |
+| Warm the whole environment into the VM (553 MiB) | 1.4 s | 1.4 s | 44 s | 41 s |
+| Build from scratch (nixpkgs source cached) | 2.1 s | 1.5 s | 8.8 s | 4.7 s |
+
+¹ An Intel Mac runner, which runs the VM under nested virtualization; most of the boot time is VZ
+loading the kernel there. ² Apple Silicon with no hardware virtualization on CI, so the arm64 guest
+runs under TCG emulation. Real Macs are expected to be much faster in both columns; they have not
+been measured yet.
 
 ## Getting started
 
