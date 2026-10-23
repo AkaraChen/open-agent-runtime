@@ -144,7 +144,7 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	useVsock := vsockAvailable()
 	m := &qemuMachine{done: make(chan struct{})}
-	cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
+	cmdline := fmt.Sprintf("console=%s %s", console, guestKernelParams)
 	// PERF: the guest's devices are all virtio and address every byte of
 	// memory, so the kernel needs no swiotlb bounce buffer (64 MiB, allocated
 	// and zeroed at boot once the guest has memory above 4 GiB).

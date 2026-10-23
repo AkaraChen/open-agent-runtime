@@ -59,7 +59,7 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		return nil, fmt.Errorf("vz can only run %s guests on this Mac", runtime.GOARCH)
 	}
 	console := "hvc0"
-	cmdline := "console=" + console + " panic=-1 quiet loglevel=3"
+	cmdline := "console=" + console + " " + guestKernelParams
 	// PERF: the guest's devices are all virtio and address every byte of
 	// memory, so the kernel needs no swiotlb bounce buffer (64 MiB, allocated
 	// and zeroed at boot once the guest has memory above 4 GiB). KASLR stays
