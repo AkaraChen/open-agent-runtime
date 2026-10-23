@@ -59,7 +59,7 @@ func (vzBackend) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 		return nil, fmt.Errorf("vz can only run %s guests on this Mac", runtime.GOARCH)
 	}
 	console := "hvc0"
-	cmdline := "console=" + console + " panic=-1 quiet loglevel=3"
+	cmdline := "console=" + console + " " + guestKernelParams
 	attachment, network, netSpec, err := vzNetwork()
 	if err != nil {
 		return nil, err
