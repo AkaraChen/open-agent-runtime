@@ -704,6 +704,12 @@ func (b *bench) phaseBuild() error {
 	if _, _, err := b.build("tree", b.writeConfig("tree", cfgOpts{extra: []string{"nix:tree"}, env: map[string]string{"VARIANT": "tree"}})); err != nil {
 		b.res.Notes = append(b.res.Notes, fmt.Sprintf("build of the nix:tree combo failed, the incremental warm has fewer samples: %v", err))
 	}
+	// the other closures of the view-reuse scenario (reuseCombos[0] is tree)
+	for _, c := range reuseCombos[1:] {
+		if _, _, err := b.build(c.name, b.writeConfig(c.name, cfgOpts{extra: c.extra, env: map[string]string{"VARIANT": c.name}})); err != nil {
+			b.res.Notes = append(b.res.Notes, fmt.Sprintf("build of the %s combo failed, the view reuse scenario is skipped: %v", c.name, err))
+		}
+	}
 	// artifact sizes
 	sizes := map[string]float64{}
 	filepath.WalkDir(b.art, func(p string, d fs.DirEntry, err error) error {
@@ -992,6 +998,9 @@ func (b *bench) phaseWarm() error {
 		b.add(g, "incr", "增量预热（只多一个小包的组合：nix:jq / nix:hello / nix:tree）", "ms", true, incr...).Note =
 			strings.Join(append([]string{incrNote}, others...), "；")
 	}
+	// Before the rest is warmed and before any other scenario starts a
+	// container: the views the scenario takes apart are its own.
+	b.viewReuse(g)
 	for _, name := range []string{"a-plain", "b-plain", "slow-a", "slow-b", "stop-a", "stop-b", "broken", "idle", "probe", "nogit", "hello", "ing-a", "ing-b", "slowi-a", "slowi-b", "probe-ing", "snap-a", "snap-b"} {
 		if b.digests[name] == "" {
 			continue // not built (-no-ingress)
@@ -1011,6 +1020,127 @@ func (b *bench) phaseWarm() error {
 	b.add(g, "guest.size", "guest 缓存占用（全部已预热组合）", "MiB", true, used/(1<<20)).Note =
 		fmt.Sprintf("store %.0f MiB / %d 文件，bases %.0f MiB", float64(after.CacheBytes["store"])/(1<<20), after.CacheFiles["store"], float64(after.CacheBytes["bases"])/(1<<20))
 	return nil
+}
+
+// reuseCombos are the closures of the view-reuse scenario: the base closure
+// and tiny packages that the incremental warm has put in the guest cache
+// already. A is the tree combo, B = A + jq, C = B + hello, D = C without
+// tree. No other scenario starts these closures.
+var reuseCombos = []struct {
+	name  string
+	extra []string
+}{
+	{"tree", nil}, // built with the combos of the incremental warm
+	{"reuse-b", []string{"nix:tree", "nix:jq"}},
+	{"reuse-c", []string{"nix:tree", "nix:jq", "nix:hello"}},
+	{"reuse-d", []string{"nix:jq", "nix:hello"}},
+}
+
+// reuseStep is one reload of the view-reuse scenario.
+type reuseStep struct {
+	back       bool    // goes back to the closure the scenario started on
+	view, wall float64 // ms: the agent's time for the store view, the CLI's wall time
+}
+
+// reuseResult is what the view-reuse scenario measured.
+type reuseResult struct {
+	steps []reuseStep
+	// steals and rebuilds are the agent's counters over the scenario
+	steals, rebuilds int
+}
+
+// record adds the metrics of the scenario to group g.
+func (r *reuseResult) record(b *bench, g string) {
+	const prefix = "连续 reload 到相邻闭包（view 复用）："
+	var first, back *reuseStep
+	var next, nextWall []float64
+	for i := range r.steps {
+		switch st := &r.steps[i]; {
+		case i == 0:
+			first = st
+		case st.back:
+			back = st
+		default:
+			next, nextWall = append(next, st.view), append(nextWall, st.wall)
+		}
+	}
+	if first == nil {
+		b.na(g, "reuse.view.first", prefix+"第 1 次 reload 的 store 视图", "没有完成一次 reload")
+		return
+	}
+	const walk = "A = 基础 + tree，B = A + jq，C = B + hello，D = C 去掉 tree；run A，再 reload 到 B、C、D，最后回到 A，每次等被替换的实例清理完再 reload。视图时间是 agent 创建实例时建 store 视图的耗时；所需产物已在 guest 缓存里，别的场景也不启动这几个闭包"
+	b.add(g, "reuse.view.first", prefix+"第 1 次 reload 的 store 视图", "ms", true, first.view).Note =
+		fmt.Sprintf("%s。第 1 次 reload 到 B：A 还有实例（不能拆），也没有别的已启动的 view，B 整个建链；端到端 %.0f ms", walk, first.wall)
+	if len(next) > 0 {
+		b.add(g, "reuse.view.next", prefix+"之后每次 reload 的 store 视图（到 C、D）", "ms", true, next...).Note =
+			fmt.Sprintf("上一个版本已空闲：C 拆 A 的 view，D 拆 B 的 view，只链接新增的 store path；各次视图 %s ms，端到端 %s ms。没有 view 复用的版本每次都整个建链，和第 1 次一样", joinMs(next), joinMs(nextWall))
+	}
+	if back != nil {
+		b.add(g, "reuse.view.back", prefix+"回到最早的闭包（A）的 store 视图", "ms", true, back.view).Note =
+			fmt.Sprintf("A 的 view 在 reload 到 C 时被拆走，现在重建（这次拆 C 的 view）；端到端 %.0f ms。没有 view 复用的版本里 A 的 view 一直在，这一步几乎不花时间：这是拆 view 的代价", back.wall)
+	}
+	b.add(g, "reuse.steals", "　其中：被拆走 store path 的 view 数（steal）", "个", false, float64(r.steals)).Note =
+		fmt.Sprintf("%d 次 reload，从第 2 次起有已启动且空闲的 view 可拆", len(r.steps))
+	b.add(g, "reuse.rebuilds", "　其中：被拆之后又被请求、重新建的 view 数（rebuild）", "个", true, float64(r.rebuilds))
+}
+
+// viewReuse measures what a reload pays for its /nix/store view when the
+// closure it moves to is next to one the guest has run before: run A, then
+// reload to B (A + jq), to C (B + hello), to D (C without tree) and back to
+// A. The first reload finds nothing to take from, since the version it
+// replaces is running; from the second on the version before is idle and
+// gives its store paths away, and going back to A has to build the view that
+// was given away.
+//
+// It runs before any other scenario starts a container, so the views it
+// takes apart are its own: a view that was only warmed ahead is never taken.
+func (b *bench) viewReuse(g string) {
+	const name = "reuse"
+	for _, c := range reuseCombos {
+		if b.digests[c.name] == "" {
+			b.na(g, "reuse.view.first", "连续 reload 到相邻闭包（view 复用）：store 视图", "组合 "+c.name+" 没有构建成功")
+			return
+		}
+	}
+	before, err := b.stats()
+	if err != nil {
+		b.na(g, "reuse.view.first", "连续 reload 到相邻闭包（view 复用）：store 视图", err.Error())
+		return
+	}
+	defer b.rm(name)
+	if _, _, err := b.run(name, b.digests[reuseCombos[0].name]); err != nil {
+		b.fail(g, "reuse.view.first", "连续 reload 到相邻闭包（view 复用）：store 视图", err.Error())
+		return
+	}
+	var res reuseResult
+	for _, to := range []int{1, 2, 3, 0} {
+		// the replaced instance is removed in the background after a reload,
+		// and until it is gone its view counts as in use
+		b.waitInstances(1)
+		var r runOut
+		wall, err := b.oarJSON(&r, "--bundle", b.digests[reuseCombos[to].name], "reload", "--name", name)
+		if err != nil {
+			b.res.Notes = append(b.res.Notes, fmt.Sprintf("view reuse scenario: reload to %s failed: %v", reuseCombos[to].name, err))
+			break
+		}
+		res.steps = append(res.steps, reuseStep{back: to == 0, view: r.Result.Timings.StoreView / 1e6, wall: ms(wall)})
+	}
+	b.waitInstances(1)
+	if after, err := b.stats(); err == nil {
+		res.steals, res.rebuilds = after.ViewSteals-before.ViewSteals, after.ViewRebuilds-before.ViewRebuilds
+	}
+	res.record(b, g)
+}
+
+// waitInstances waits for the agent to have n instance directories or
+// fewer: a retired instance is removed in the background after a reload.
+func (b *bench) waitInstances(n int) {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		var info proto.InfoResult
+		if err := b.client().Call(context.Background(), proto.OpInfo, nil, &info); err == nil && info.Containers <= n {
+			return
+		}
+	}
 }
 
 // ---- phase 4: start ----
