@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/AkaraChen/open-agent-runtime/internal/nixeval/iets"
 )
@@ -52,6 +53,26 @@ type Request struct {
 type Result struct {
 	Outputs     []string `json:"outputs"`
 	MainProgram string   `json:"mainProgram,omitempty"`
+}
+
+// Timings is where the time of one `oar nix-eval` run went. In JSON the
+// durations are nanoseconds, and a missing one is zero.
+type Timings struct {
+	// Source is the time spent getting the nixpkgs tree: downloading and
+	// extracting it. The command counts a tree that is already in place, which
+	// costs a stat, as zero (it truncates the time to the millisecond).
+	Source time.Duration `json:"source"`
+	// Eval is the time spent in the evaluator call itself.
+	Eval time.Duration `json:"eval"`
+}
+
+// Timed is the output of `oar nix-eval --json --timings`: the evaluator's
+// JSON, and the Timings of the run. Without --timings the command prints the
+// evaluator's JSON alone, so the plain --json output does not change from
+// one run to the next.
+type Timed struct {
+	Result  json.RawMessage `json:"result"`
+	Timings Timings         `json:"timings"`
 }
 
 // Evaluator answers a Request with the strict JSON rendering of the value.

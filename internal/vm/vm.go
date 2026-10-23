@@ -41,6 +41,23 @@ type MachineConfig struct {
 	GuestCmdline string `json:"guestCmdline,omitempty"`
 }
 
+// guestKernelParams is what every backend puts on the guest kernel command
+// line after the console device.
+//
+// PERF: rcupdate.rcu_expedited=1 turns every synchronize_rcu() in the guest
+// from a grace period (3 to 10 ms) into a few hundred microseconds. runc
+// create (and runc exec) wait for one: the container init joins its cgroup
+// through a cgroup.procs write, which takes the cgroup threadgroup rwsem for
+// writing, and rcu_sync_enter() on it waits a grace period unless another
+// cgroup attach ran a few ms earlier. Measured (docs/research/runc-create-
+// profile.md): that write is 5.4 ms median (3 to 15) of a 25.5 ms runc
+// create on a 8 vCPU Linux 7.0 host and 0.09 ms with the parameter; runc
+// create wall time 27.7 -> 19.7 ms (1.5.2) and 26.6 -> 18.8 ms (1.4.0),
+// n=60 interleaved; the same write 8.8 -> 3.5 ms in this guest kernel under
+// QEMU TCG. The cost is an IPI to every vCPU per grace period. Pass
+// rcupdate.rcu_expedited=0 to --guest-cmdline to switch it off (A/B).
+const guestKernelParams = "panic=-1 quiet loglevel=3 rcupdate.rcu_expedited=1"
+
 // Machine is a running guest.
 type Machine interface {
 	// DialAgent opens a new stream to the guest agent.
@@ -282,6 +299,19 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 			ready, listening = nil, true
 			continue
 		}
+		// PERF: a probe that fails (refused or reset before the agent
+		// listens) returns at once, so this pause is what separates the
+		// agent starting to listen from the host noticing. At 20 ms that was
+		// up to 20 ms, 10 ms on average, in the boot.detect metric. 2 ms
+		// while a guest can still be ready soon (kvm boots in about 400 ms);
+		// emulated and nested guests take seconds, and each probe that
+		// reaches one costs it an interrupt, so after the first second they
+		// are probed less often. A connect that hangs is bounded by the
+		// attempt timeout instead.
+		pause := 2 * time.Millisecond
+		if time.Since(st.Started) > time.Second {
+			pause = 10 * time.Millisecond
+		}
 		select {
 		case <-m.Done():
 			if e, ok := m.(interface{ ExitErr() error }); ok && e.ExitErr() != nil {
@@ -291,7 +321,7 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		case <-ctx.Done():
 			m.Kill()
 			return fail(ctx.Err())
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(pause):
 		}
 		if time.Now().After(deadline) {
 			m.Kill()
@@ -303,7 +333,11 @@ func Supervise(ctx context.Context, b Backend, cfg MachineConfig, owner *Owner, 
 		st.Phases[phase] = at
 	}
 	st.Phases["agentReachable"] = st.Boot
-	fmt.Fprintf(log, "guest ready in %s: kernel %s, %s\n", st.Boot.Round(time.Millisecond), info.Kernel, info.Runc)
+	msg := fmt.Sprintf("guest ready in %s: kernel %s", st.Boot.Round(time.Millisecond), info.Kernel)
+	if info.Runc != "" { // the agent looks it up in the background; vm status shows it later
+		msg += ", " + info.Runc
+	}
+	fmt.Fprintln(log, msg)
 
 	os.Remove(st.Socket)
 	l, err := net.Listen("unix", st.Socket)

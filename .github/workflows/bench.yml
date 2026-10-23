@@ -9,8 +9,9 @@ on:
       base:
         description: >-
           A/B mode: also benchmark this commit (full sha, tag or branch) on
-          the same runners, interleaved with this one, using this harness
-          with -no-ingress; empty runs the normal benchmark
+          the same runners, interleaved with this one, using this harness;
+          it has to be recent enough for the whole benchmark (ingress proxy,
+          hot standby, snapshots); empty runs the normal benchmark
         default: ""
       rounds:
         description: A/B mode, benchmark runs per side
@@ -18,6 +19,9 @@ on:
       backends:
         description: A/B mode, comma separated backends to run
         default: native,kvm,vz,qemu
+      gate:
+        description: A/B mode, fail the job when a gated metric regresses (true or false)
+        default: "false"
 
 env:
   GO_VERSION: "1.26"
@@ -136,7 +140,8 @@ jobs:
             results-${{ matrix.label }}*.log
 
   # A/B: base and head on the same runner, interleaved (base head head base
-  # ...), so runner variance cancels out
+  # ...), so runner variance cancels out; bench compare pairs the rounds and
+  # writes the verdict to the job summary
   bench-ab:
     name: bench A/B ${{ matrix.backend }} (${{ matrix.os }})
     if: github.event.inputs.base != ''
@@ -215,7 +220,7 @@ jobs:
               echo "::group::round $i: $side"
               go run ./hack/bench run -guest-dir $GITHUB_WORKSPACE/$side/guest/out \
                 -backend ${{ matrix.backend }} -arch ${{ matrix.arch }} \
-                -profile ${{ github.event.inputs.profile || 'quick' }} -no-ingress \
+                -profile ${{ github.event.inputs.profile || 'quick' }} \
                 -oar $GITHUB_WORKSPACE/$side/bin/oar \
                 -out ../results/results-${{ matrix.label }}-$side-$i.json -- --cpus 2 --memory 4096 \
                 || echo "::warning::$side round $i failed"
@@ -223,6 +228,20 @@ jobs:
             done
           done
           hack/ci-resources.sh "after the last round" 2>&1 | tee -a ../results/resources.log
+      - if: steps.sel.outputs.run == 'true' && (always())
+        name: compare base and head
+        working-directory: head
+        env:
+          GATE: ${{ github.event.inputs.gate }}
+        # the summary is the result; compare exits 1 when a gated metric
+        # failed, which fails the job only if the gate input is true
+        # (pipefail: the exit code has to survive the pipe to tee)
+        run: |
+          set -o pipefail
+          go run ./hack/bench compare -dir ../results -label ${{ matrix.label }} | tee -a "$GITHUB_STEP_SUMMARY" || {
+            [ "$GATE" = true ] && exit 1
+            echo "::warning::bench compare failed; not failing the job because the gate input is false"
+          }
       - uses: actions/upload-artifact@v7
         if: steps.sel.outputs.run == 'true' && (always())
         with:

@@ -144,7 +144,19 @@ func (q qemu) Boot(ctx context.Context, cfg MachineConfig) (Machine, error) {
 	}
 	useVsock := vsockAvailable()
 	m := &qemuMachine{done: make(chan struct{})}
-	cmdline := fmt.Sprintf("console=%s panic=-1 quiet loglevel=3", console)
+	cmdline := fmt.Sprintf("console=%s %s", console, guestKernelParams)
+	// PERF: the guest's devices are all virtio and address every byte of
+	// memory, so the kernel needs no swiotlb bounce buffer (64 MiB, allocated
+	// and zeroed at boot once the guest has memory above 4 GiB).
+	// KASLR stays: nokaslr would save only a relocation pass before the
+	// kernel's clock starts, and KASLR hides the guest kernel's layout from
+	// the code the agent runs.
+	cmdline += " swiotlb=noforce"
+	if arch == "amd64" {
+		// PERF: skips the early PCI quirk scan, about 140 port accesses (VM
+		// exits) that probe bus 0 for chipsets a VM does not have
+		cmdline += " pci=noearly"
+	}
 	if cfg.GuestCmdline != "" {
 		cmdline += " " + cfg.GuestCmdline
 	}

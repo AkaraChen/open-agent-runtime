@@ -46,6 +46,9 @@ const (
 	// OpViewPrepare starts building a closure's store view while a warm
 	// is still uploading (args: ComposeArgs; returns at once).
 	OpViewPrepare = "view.prepare"
+	// OpDebugProfile streams a Go runtime profile of the agent process
+	// (args: DebugProfileArgs; the profile is the response body).
+	OpDebugProfile = "debug.profile"
 )
 
 // Request header.

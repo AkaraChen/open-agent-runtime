@@ -2,6 +2,13 @@ name: boot-profile
 
 # Boots the guest once on KVM with initcall_debug and prints where the
 # kernel spends its boot time (slowest initcalls, timeline milestones).
+#
+# PERF: the kernel does not print the initcalls to the console. Printing them
+# (loglevel=8) costs a VM exit per character on the emulated serial port and
+# stretches a 0.4 s boot to 2-4 s, so it would be profiling another boot. They
+# stay in the kernel's ring buffer (log_buf_len=4M holds all of them) and the
+# agent dumps the buffer to the console once the host has connected
+# (oar.dumpkmsg=1), when the boot that is measured is over.
 on:
   workflow_dispatch:
     inputs:
@@ -45,8 +52,18 @@ jobs:
           OAR_STATE=$XDG_DATA_HOME/oar
           for run in plain debug; do
             extra="${{ github.event.inputs.cmdline }}"
-            [ $run = debug ] && extra="$extra initcall_debug loglevel=8 printk.time=1"
+            [ $run = debug ] && extra="$extra initcall_debug log_buf_len=4M oar.dumpkmsg=1"
             bin/oar vm start --backend kvm --cpus 2 --memory 4096 --guest-cmdline "$extra"
+            if [ $run = debug ]; then
+              # the dump starts after the host's first request and takes a
+              # while on the serial console: wait for the line that ends it
+              for _ in $(seq 150); do
+                grep -q "kernel log dump " "$OAR_STATE/vms/default/console.log" && break
+                sleep 0.2
+              done
+              grep -q "kernel log dump done" "$OAR_STATE/vms/default/console.log" ||
+                echo "::warning::the kernel log dump did not finish"
+            fi
             cp "$OAR_STATE/vms/default/console.log" "console-$run.log"
             echo "== $run: phases (ms since start)"
             jq -c '.phases | map_values(. / 1000000 | floor)' "$OAR_STATE/vms/default/state.json"
@@ -59,7 +76,7 @@ jobs:
             awk '{print $6, $2}' | sort -rn | head -40
           grep -oE "initcall [^ ]+ returned [-0-9]+ after [0-9]+ usecs" console-debug.log |
             awk '{s+=$6} END {print "total:", s, "usecs"}'
-          echo "== milestones"
+          echo "== milestones (kernel records are level,sequence,usecs since boot,flags;message)"
           grep -E "Linux version|Unpacking initramfs|Freeing initrd|Freeing unused kernel|Run /init|oar-init" console-debug.log | head -20
       - uses: actions/upload-artifact@v7
         if: always()

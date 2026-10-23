@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -30,16 +31,46 @@ type storeGroups struct {
 	mu      sync.Mutex
 	mounted map[string]bool       // views known to be complete
 	builds  map[string]*viewBuild // views being built ahead of a precompose
+	used    map[string]bool       // views known to be marked used (markViewUsed)
+	donated map[string]bool       // views taken apart for another one and not built since
+
+	// held counts, per view, the instance creations that asked for it and
+	// have not written the instance's marker yet (holdView)
+	heldMu sync.Mutex
+	held   map[string]int
+
+	// steals and rebuilds are the counters of the agent's stats
+	steals, rebuilds atomic.Int64
 }
 
 // ensureStoreView builds the bundle's /nix/store view if it is missing.
-func (s *Server) ensureStoreView(b *compose.Bundle) error {
+func (s *Server) ensureStoreView(b *compose.Bundle) error { return s.ensureView(b, false) }
+
+// useStoreView is ensureStoreView for an instance that is being created on
+// the view: it also marks the view used (markViewUsed).
+func (s *Server) useStoreView(b *compose.Bundle) error { return s.ensureView(b, true) }
+
+// ensureView makes the bundle's view complete and, if use is set, marks it
+// used, under one hold of groups.mu.
+func (s *Server) ensureView(b *compose.Bundle, use bool) error {
 	if len(b.StoreLayers) == 0 {
 		return nil
 	}
-	view := b.StoreView
 	s.groups.mu.Lock()
 	defer s.groups.mu.Unlock()
+	if err := s.completeView(b); err != nil {
+		return err
+	}
+	if use {
+		s.markViewUsed(b.StoreView)
+	}
+	return nil
+}
+
+// completeView builds the bundle's view if it is missing (caller holds
+// groups.mu).
+func (s *Server) completeView(b *compose.Bundle) error {
+	view := b.StoreView
 	if s.groups.mounted == nil {
 		s.groups.mounted = map[string]bool{}
 	}
@@ -87,11 +118,13 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
+	s.beginViewBuild(view)
+	moved := s.stealViews(tmp, b.StoreLayers, view)
 	// store paths are linked in parallel: the cost is one syscall per file
 	work := make(chan string)
 	errs := make(chan error, len(b.StoreLayers))
 	var wg sync.WaitGroup
-	for range min(runtime.NumCPU()*2, len(b.StoreLayers)) {
+	for range min(runtime.NumCPU()*2, max(len(b.StoreLayers)-len(moved), 1)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -105,7 +138,9 @@ func (s *Server) ensureStoreView(b *compose.Bundle) error {
 		}()
 	}
 	for _, layer := range b.StoreLayers {
-		work <- layer
+		if !moved[filepath.Base(layer)] {
+			work <- layer
+		}
 	}
 	close(work)
 	wg.Wait()
@@ -457,10 +492,15 @@ func (s *Server) prepareView(layers []string, view string) {
 		s.groups.mu.Unlock()
 		return
 	}
+	s.beginViewBuild(view)
+	moved := s.stealViews(tmp, layers, view)
 	vb := &viewBuild{tmp: tmp, done: make(chan struct{}), pending: map[string]bool{}}
 	for _, l := range layers {
-		vb.pending[l] = true
+		if !moved[filepath.Base(l)] {
+			vb.pending[l] = true
+		}
 	}
+	vb.finish() // nothing to link when the donor had it all
 	if s.groups.builds == nil {
 		s.groups.builds = map[string]*viewBuild{}
 	}

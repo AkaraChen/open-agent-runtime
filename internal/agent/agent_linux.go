@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -57,9 +59,10 @@ type Server struct {
 	groups   storeGroups
 	ing      ingresses
 
-	runcVerOnce sync.Once
-	runcVer     string
-	warmMu      sync.Map // per-key locks for warm.put
+	// runcVer is runc's version line once the lookup New starts in the
+	// background has finished; nil until then
+	runcVer atomic.Pointer[string]
+	warmMu  sync.Map // per-key locks for warm.put
 	// private gives Root private propagation before the first mount
 	// below it (see makePrivate); privateBind is set when that
 	// bind-mounted Root onto itself
@@ -76,6 +79,17 @@ func New(cfg Config) (*Server, error) {
 		cfg.Runc.Root = "/run/oar/runc"
 	}
 	s := &Server{cfg: cfg, layout: compose.Layout{Root: cfg.Root}, booted: time.Now()}
+	// PERF: look runc's version up in the background. The host's readiness
+	// probe is the first info call, and info used to wait for this exec. In
+	// an emulated or nested guest, exec'ing the 10 MiB static runc takes
+	// 100-200 ms, which is what the step 13 baseline measured as the "agent
+	// listening -> host connected" delay: vz 114 ms, qemu/TCG 187 ms (kvm,
+	// where the exec is fast: 2.75 ms). Now info reports the version once it
+	// is known and an empty string until then.
+	go func() {
+		v := cfg.Runc.Version()
+		s.runcVer.Store(&v)
+	}()
 	// a fresh version after a restart, so a waiting host never mistakes
 	// the new list for the one it already has
 	s.ing.ver = uint64(s.booted.UnixNano())
@@ -103,11 +117,14 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// runcVersion is computed once: exec'ing runc on every info call costs
-// tens of milliseconds in slow guests, and every CLI command calls info.
+// runcVersion is runc's version line, or "" while the lookup New started is
+// still running. It is looked up once: exec'ing runc on every info call would
+// cost tens of milliseconds in slow guests, and every CLI command calls info.
 func (s *Server) runcVersion() string {
-	s.runcVerOnce.Do(func() { s.runcVer = s.cfg.Runc.Version() })
-	return s.runcVer
+	if v := s.runcVer.Load(); v != nil {
+		return *v
+	}
+	return ""
 }
 
 // Handle dispatches a request and logs failures to the agent's stderr
@@ -133,6 +150,7 @@ func (s *Server) Handle(ctx context.Context, req *proto.Request, body io.Reader,
 // polls, uploads); the others are reported when they exceed slowRequest.
 var longRunning = map[string]bool{
 	proto.OpLogs: true, proto.OpExec: true, proto.OpDial: true, proto.OpIngress: true, proto.OpWarmPut: true,
+	proto.OpDebugProfile: true,
 }
 
 const slowRequest = 60 * time.Second
@@ -207,7 +225,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		start := time.Now()
+		start, before := time.Now(), readUsage()
 		res, err := compose.Compose(s.layout, a.Lock, runtime.GOARCH)
 		if err != nil {
 			return nil, err
@@ -220,14 +238,15 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if a.Flush {
 			s.flushCache()
 		}
+		used := readUsage().since(before)
 		return proto.ComposeResult{BundleDigest: res.Bundle.Digest, Cached: res.Cached, Duration: time.Since(start), Layers: res.Bundle.Layers,
-			View: tFlush.Sub(tView), Flush: time.Since(tFlush)}, nil
+			View: tFlush.Sub(tView), Flush: time.Since(tFlush), CPUUser: used.user, CPUSys: used.sys}, nil
 	case proto.OpRun, proto.OpReload:
 		var a proto.RunArgs
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.run(ctx, a, req.Op == proto.OpReload)
+		return withUsage(func() (*proto.RunResult, error) { return s.run(ctx, a, req.Op == proto.OpReload) })
 	case proto.OpDial:
 		var a proto.DialArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -245,7 +264,7 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		if err := proto.Decode(req, &a); err != nil {
 			return nil, err
 		}
-		return s.prepare(ctx, a)
+		return withUsage(func() (*proto.RunResult, error) { return s.prepare(ctx, a) })
 	case proto.OpStop:
 		var a proto.NameArgs
 		if err := proto.Decode(req, &a); err != nil {
@@ -318,6 +337,12 @@ func (s *Server) handle(ctx context.Context, req *proto.Request, body io.Reader,
 		}
 		s.prepareView(compose.StoreLayers(s.layout, a.Lock), s.layout.StoreView(compose.ClosureKey(a.Lock)))
 		return map[string]string{}, nil
+	case proto.OpDebugProfile:
+		var a proto.DebugProfileArgs
+		if err := proto.Decode(req, &a); err != nil {
+			return nil, err
+		}
+		return nil, debugProfile(ctx, a, rs)
 	case proto.OpShutdown:
 		if s.cfg.Shutdown == nil {
 			return nil, fmt.Errorf("shutdown is only supported inside the guest VM")
@@ -780,6 +805,12 @@ func (s *Server) createInstance(ctx context.Context, name string, a proto.RunArg
 	if err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
 	}
+	// The view is built here to time it apart from the instantiation. It is
+	// held from this first request: instantiate writes the instance's marker,
+	// which protects the view, only after it has made the instance directory,
+	// and marks the view used when it asks for it again.
+	release := s.holdView(res.Bundle.StoreView)
+	defer release()
 	tView := time.Now()
 	if err := s.ensureStoreView(res.Bundle); err != nil {
 		return nil, false, time.Time{}, time.Time{}, err
@@ -851,7 +882,7 @@ func (s *Server) takePrepared(ctx context.Context, name, digest string) *instanc
 			continue
 		}
 		if in.BundleDigest == digest && found == nil {
-			if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
+			if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil && (st.Status == "created" || in.Started && st.Status == "running") {
 				found = in
 				continue
 			}
@@ -949,9 +980,22 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	var last error
+	var logs logSearch
+	defer logs.close()
 	for {
+		// PERF: the tcp and log probes cost microseconds (a dial to a port
+		// nobody listens on yet, the bytes the log gained), and so does the
+		// liveness check below, which reads runc's state files. They run
+		// every millisecond to begin with, so readiness is noticed within a
+		// millisecond of the application being ready. Each round used to be
+		// a `runc state` exec (4.6 ms on KVM, 100 ms on vz, 250 ms on TCG)
+		// plus a 10 ms sleep, which made readiness come in steps of 14.6 ms
+		// on KVM. The exec probe runs a process in the container each time
+		// and keeps its 10 ms.
+		pause := pollPause(time.Since(start))
 		switch {
 		case r.TCP != "":
 			c, err := net.DialTimeout("tcp", r.TCP, 200*time.Millisecond)
@@ -961,14 +1005,17 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 			}
 			last = err
 		case len(r.Exec) > 0:
+			pause = 10 * time.Millisecond
 			code, _, stderr, err := s.cfg.Runc.Exec(ctx, in.ID, nil, r.Exec)
 			if err == nil && code == 0 {
 				return nil
 			}
 			last = fmt.Errorf("exit %d: %v %s", code, err, strings.TrimSpace(stderr))
 		case r.Log != "":
-			b, err := os.ReadFile(filepath.Join(in.dir, "console.log"))
-			if err == nil && strings.Contains(string(b), r.Log) {
+			if logs.needle == nil {
+				logs.path, logs.needle = filepath.Join(in.dir, "console.log"), []byte(r.Log)
+			}
+			if logs.found() {
 				return nil
 			}
 			last = fmt.Errorf("%q not in output yet", r.Log)
@@ -982,8 +1029,65 @@ func (s *Server) waitReady(ctx context.Context, in *instance, r *manifest.Ready)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(pause):
 		}
+	}
+}
+
+// pollPause is the pause between two rounds of a cheap readiness probe, given
+// how long the application has been starting: a millisecond for the first 50
+// ms, where a late answer is a large share of the wait, then 2% of the time
+// waited so far, up to the 10 ms that rounds used to have. A round costs
+// about 100 to 200 microseconds of CPU, so polling every millisecond for as
+// long as a slow application takes would use a fifth of a core per waiting
+// container, which matters when many start at once on a couple of vCPUs.
+func pollPause(waited time.Duration) time.Duration {
+	return min(max(waited/50, time.Millisecond), 10*time.Millisecond)
+}
+
+// logSearch looks for a string in a log that grows. Every call continues
+// where the previous one stopped, so polling it every millisecond reads each
+// byte of the log once instead of the whole log every time.
+type logSearch struct {
+	path   string
+	needle []byte
+	f      *os.File
+	off    int64  // bytes read so far
+	carry  []byte // the last len(needle)-1 of them: a match may straddle two reads
+	buf    []byte
+}
+
+// found reports whether the string is in the log so far.
+func (l *logSearch) found() bool {
+	if l.f == nil {
+		f, err := os.Open(l.path)
+		if err != nil {
+			return false
+		}
+		l.f = f
+		l.buf = make([]byte, max(32<<10, 2*len(l.needle)))
+	}
+	for {
+		n := copy(l.buf, l.carry)
+		m, err := l.f.ReadAt(l.buf[n:], l.off)
+		if m == 0 {
+			return false // nothing new yet
+		}
+		l.off += int64(m)
+		data := l.buf[:n+m]
+		if bytes.Contains(data, l.needle) {
+			return true
+		}
+		l.carry = append(l.carry[:0], data[max(0, len(data)-len(l.needle)+1):]...)
+		if err != nil {
+			return false // the end of the log for now
+		}
+	}
+}
+
+func (l *logSearch) close() {
+	if l.f != nil {
+		l.f.Close()
 	}
 }
 
@@ -1009,6 +1113,13 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 			return nil, err
 		}
 	}
+	if b.StoreView != "" {
+		// before the view is requested: from now on it must not be taken apart
+		if err := os.WriteFile(filepath.Join(in.dir, viewMarker), []byte(b.StoreView), 0o644); err != nil {
+			os.RemoveAll(in.dir)
+			return nil, err
+		}
+	}
 	if seed != "" {
 		if out, err := exec.Command("cp", "-a", seed, filepath.Join(in.dir, "upper")).CombinedOutput(); err != nil {
 			os.RemoveAll(in.dir)
@@ -1017,7 +1128,9 @@ func (s *Server) instantiateSeeded(name string, b *compose.Bundle, extraEnv []st
 	} else if err := os.MkdirAll(filepath.Join(in.dir, "upper"), 0o755); err != nil {
 		return nil, err
 	}
-	if err := s.ensureStoreView(b); err != nil {
+	// the view is marked used here, with the instance's marker already in
+	// place: createInstance, prepare and restore all come through this call
+	if err := s.useStoreView(b); err != nil {
 		os.RemoveAll(in.dir)
 		return nil, err
 	}
@@ -1074,9 +1187,15 @@ func (s *Server) destroy(ctx context.Context, in *instance, force bool) error {
 	return os.RemoveAll(in.dir)
 }
 
+// observe reports an instance as it is right now.
+//
+// PERF: the status comes from runc's state files (Runc.FastState), not from
+// a `runc state` exec: observe ends every run and reload and backs list,
+// state and the readiness poll, and an exec costs 4.6 ms on KVM, 100 ms on
+// vz and 250 ms on TCG.
 func (s *Server) observe(ctx context.Context, in *instance) proto.Container {
 	c := proto.Container{Name: in.Name, ID: in.ID, BundleDigest: in.BundleDigest, Created: in.Created, Bundle: in.dir, Status: "unknown"}
-	if st, err := s.cfg.Runc.State(ctx, in.ID); err == nil {
+	if st, err := s.cfg.Runc.FastState(ctx, in.ID); err == nil {
 		c.Status, c.Pid = st.Status, st.Pid
 		if st.Status == "stopped" {
 			c.Pid = 0

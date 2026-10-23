@@ -14,7 +14,7 @@ type InfoResult struct {
 	Kernel       string `json:"kernel"`
 	Root         string `json:"root"`
 	Mode         string `json:"mode"` // vm or native
-	Runc         string `json:"runc"`
+	Runc         string `json:"runc"` // empty until the agent's background lookup of the version finishes
 	BootedAt     string `json:"bootedAt,omitempty"`
 	Containers   int    `json:"containers"`
 }
@@ -66,10 +66,42 @@ type StatsResult struct {
 	Dirty        int64            `json:"dirty"`     // page cache waiting for writeback
 	Writeback    int64            `json:"writeback"` // being written back
 
+	// ViewSteals counts the /nix/store views taken apart to build another
+	// one (their store paths moved by rename instead of linked again), and
+	// ViewRebuilds the views built for a closure whose view an earlier steal
+	// had taken. Both count since the agent started.
+	ViewSteals   int `json:"viewSteals"`
+	ViewRebuilds int `json:"viewRebuilds"`
+
 	Uptime float64 `json:"uptime"`
 	Load1  float64 `json:"load1"`
 	// Boot holds guest uptimes (seconds) at boot milestones (vm mode).
 	Boot map[string]float64 `json:"boot,omitempty"`
+}
+
+// Profile kinds of debug.profile.
+const (
+	ProfileCPU       = "cpu"
+	ProfileHeap      = "heap"
+	ProfileAllocs    = "allocs"
+	ProfileGoroutine = "goroutine"
+	ProfileBlock     = "block"
+	ProfileMutex     = "mutex"
+	ProfileTrace     = "trace"
+)
+
+// DebugProfileArgs selects a profile of the agent process. The body of the
+// response is the profile as runtime/pprof writes it (gzipped protobuf,
+// read with `go tool pprof`), or the execution trace for ProfileTrace
+// (`go tool trace`).
+type DebugProfileArgs struct {
+	// Kind is one of the Profile* kinds.
+	Kind string `json:"kind"`
+	// Seconds is how long the kinds that sample over time run: cpu, trace,
+	// block and mutex (default 10, at most 120). Block and mutex profiling
+	// is off in the Go runtime until enabled, so the agent enables it for
+	// that long. The other kinds are instantaneous and ignore it.
+	Seconds int `json:"seconds"`
 }
 
 // WarmStatusArgs asks which items are missing.
@@ -115,6 +147,10 @@ type ComposeResult struct {
 	// view and writing the cache back (warm precompose).
 	View  time.Duration `json:"view,omitempty"`
 	Flush time.Duration `json:"flush,omitempty"`
+	// CPUUser and CPUSys are the CPU time of the agent process and its
+	// reaped children over the request (process-wide, see Timings).
+	CPUUser time.Duration `json:"cpuUser,omitempty"`
+	CPUSys  time.Duration `json:"cpuSys,omitempty"`
 }
 
 // Reload strategies.
@@ -160,6 +196,16 @@ type Timings struct {
 	// Downtime is the window with no running instance (replace strategy).
 	Downtime time.Duration `json:"downtime,omitempty"`
 	Total    time.Duration `json:"total"`
+
+	// Resource use of the agent process over the request: runc processes
+	// it started, CPU time and page faults of the agent and its reaped
+	// children. Unlike the durations above these are process-wide, so
+	// concurrent requests share them.
+	RuncExecs   int           `json:"runcExecs,omitempty"`
+	CPUUser     time.Duration `json:"cpuUser,omitempty"`
+	CPUSys      time.Duration `json:"cpuSys,omitempty"`
+	MinorFaults int64         `json:"minorFaults,omitempty"`
+	MajorFaults int64         `json:"majorFaults,omitempty"`
 }
 
 // RunResult describes a started container.

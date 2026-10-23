@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,8 +73,12 @@ func vmCmd(g *globalOpts) *cobra.Command {
 					fmt.Printf("  agent unreachable: %v\n", err)
 					return
 				}
+				runc := info.Runc
+				if runc == "" {
+					runc = "runc version pending" // the agent looks it up in the background after it starts
+				}
 				fmt.Printf("  guest: linux/%s kernel %s, mode %s, %s\n  cache: %s, containers: %d\n",
-					info.Arch, info.Kernel, info.Mode, info.Runc, info.Root, info.Containers)
+					info.Arch, info.Kernel, info.Mode, runc, info.Root, info.Containers)
 			})
 			return nil
 		},
@@ -122,7 +127,8 @@ func vmCmd(g *globalOpts) *cobra.Command {
 			}
 			g.print(st, func() {
 				fmt.Printf("memory: %s available of %s (page cache %s)\n", human(st.MemAvailable), human(st.MemTotal), human(st.Cached))
-				fmt.Printf("mounts %d, store views %d, instances %d, cgroups %d, load %.2f\n", st.Mounts, st.StoreViews, st.Instances, st.Cgroups, st.Load1)
+				fmt.Printf("mounts %d, store views %d (%d taken apart for another closure, %d built again since), instances %d, cgroups %d, load %.2f\n",
+					st.Mounts, st.StoreViews, st.ViewSteals, st.ViewRebuilds, st.Instances, st.Cgroups, st.Load1)
 				for _, k := range sortedKeys(st.CacheBytes) {
 					fmt.Printf("cache %-10s %10s  %8d files\n", k, human(st.CacheBytes[k]), st.CacheFiles[k])
 				}
@@ -130,8 +136,74 @@ func vmCmd(g *globalOpts) *cobra.Command {
 			return nil
 		},
 	}
-	c.AddCommand(start, stop, status, supervise, backends, statsCmd)
+	var profKind, profOut string
+	var profSeconds int
+	profile := &cobra.Command{
+		Use:    "profile",
+		Short:  "Fetch a Go runtime profile of the guest agent",
+		Hidden: true,
+		Long: "Fetches a runtime/pprof profile of the guest agent process (the supervisor on the native backend)\n" +
+			"and writes it to a file. Read it with `go tool pprof FILE`; --kind trace is an execution trace\n" +
+			"for `go tool trace FILE`.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return fetchProfile(cmd.Context(), g, profKind, profSeconds, profOut)
+		},
+	}
+	profile.Flags().StringVar(&profKind, "kind", proto.ProfileCPU, "cpu, heap, allocs, goroutine, block, mutex or trace")
+	profile.Flags().IntVar(&profSeconds, "seconds", 10, "how long cpu, trace, block and mutex sample (at most 120)")
+	profile.Flags().StringVarP(&profOut, "output", "o", "", "file to write the profile to (- for stdout)")
+	profile.MarkFlagRequired("output")
+	c.AddCommand(start, stop, status, supervise, backends, statsCmd, profile)
 	return c
+}
+
+// fetchProfile saves a runtime profile of the guest agent (see
+// proto.DebugProfileArgs) to path, or to stdout for "-".
+func fetchProfile(ctx context.Context, g *globalOpts, kind string, seconds int, path string) error {
+	cl, err := connect(ctx, g)
+	if err != nil {
+		return err
+	}
+	out := os.Stdout
+	if path != "-" {
+		if out, err = os.Create(path); err != nil {
+			return err
+		}
+	}
+	w := &countWriter{w: out}
+	err = cl.CallBody(ctx, proto.OpDebugProfile, proto.DebugProfileArgs{Kind: kind, Seconds: seconds}, nil, 0, nil, w)
+	if path != "-" {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err == nil && w.n == 0 {
+		err = fmt.Errorf("the agent sent an empty %s profile", kind)
+	}
+	if err != nil {
+		if path != "-" {
+			os.Remove(path)
+		}
+		return err
+	}
+	if path == "-" {
+		path = "stdout"
+	}
+	fmt.Fprintf(os.Stderr, "%s profile: %s -> %s\n", kind, human(w.n), path)
+	return nil
+}
+
+// countWriter counts the bytes written through it.
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func addStartFlags(c *cobra.Command, o *vmStartOpts) {
@@ -215,7 +287,16 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("launch supervisor: %w", err)
 	}
-	deadline := time.Now().Add(6 * time.Minute)
+	// PERF: poll adaptively. A fixed 100 ms sleep here rounded every "VM cold
+	// boot" timed through the CLI up to a multiple of 100 ms plus the launch
+	// time (the baseline's kvm 409 ms is 4 polls + 9 ms, its native 116 ms is
+	// 1 poll + 16 ms), so those numbers described the poll, not the boot. A
+	// pipe that the supervisor closes when it is ready would avoid polling,
+	// but sudo (native backend) closes inherited file descriptors; reading
+	// state.json works everywhere, and 2 ms steps are cheap for the first
+	// second.
+	waitStart := time.Now()
+	deadline := waitStart.Add(6 * time.Minute)
 	for time.Now().Before(deadline) {
 		st, err := vm.ReadState(dir)
 		if err == nil {
@@ -235,10 +316,25 @@ func startVM(ctx context.Context, g *globalOpts, o *vmStartOpts, verbose bool) e
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(vmPollInterval(time.Since(waitStart))):
 		}
 	}
 	return fmt.Errorf("vm did not become ready\n%s", tail(filepath.Join(dir, "supervisor.log"), 30))
+}
+
+// vmPollInterval is how long startVM waits before it reads the supervisor's
+// state again, given how long it has been waiting: short while a native or
+// warm guest can be ready within milliseconds, longer once the boot drags on
+// (emulated guests take seconds), so that a slow boot does not keep the CLI
+// busy.
+func vmPollInterval(waited time.Duration) time.Duration {
+	switch {
+	case waited < time.Second:
+		return 2 * time.Millisecond
+	case waited < 10*time.Second:
+		return 20 * time.Millisecond
+	}
+	return 100 * time.Millisecond
 }
 
 func supervise(ctx context.Context, dir, owner string, daemonize bool) error {

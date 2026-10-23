@@ -3,6 +3,7 @@ package nixeval
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,11 +12,11 @@ import (
 	"strings"
 )
 
-// Child evaluates by running `oar nix-eval --json` as a child process, so
-// an evaluator that dies (an abort in the embedded library, an out-of-memory
-// exit) is an error here rather than the end of the caller. The child picks
-// the backend (the first available one) unless Backend is set; if that
-// evaluator crashes, the next available one is used.
+// Child evaluates by running `oar nix-eval --json --timings` as a child
+// process, so an evaluator that dies (an abort in the embedded library, an
+// out-of-memory exit) is an error here rather than the end of the caller. The
+// child picks the backend (the first available one) unless Backend is set; if
+// that evaluator crashes, the next available one is used.
 type Child struct {
 	// Executable defaults to the running binary.
 	Executable string
@@ -45,7 +46,30 @@ func (t *stderrTail) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Eval runs the child and returns the evaluator's JSON.
 func (c Child) Eval(ctx context.Context, req Request) ([]byte, error) {
+	out, _, err := c.EvalTimed(ctx, req)
+	return out, err
+}
+
+// EvalTimed is Eval, and also returns where the child spent its time. A child
+// that prints the evaluator's JSON alone, as one that predates --timings
+// would, has it returned as it is, with zero Timings; a Timings field the
+// child leaves out is zero as well.
+func (c Child) EvalTimed(ctx context.Context, req Request) ([]byte, Timings, error) {
+	raw, err := c.run(ctx, req)
+	if err != nil {
+		return nil, Timings{}, err
+	}
+	var t Timed
+	if err := json.Unmarshal(raw, &t); err != nil || t.Result == nil {
+		return raw, Timings{}, nil
+	}
+	return t.Result, t.Timings, nil
+}
+
+// run starts the child and returns what it printed.
+func (c Child) run(ctx context.Context, req Request) ([]byte, error) {
 	exe := c.Executable
 	if exe == "" {
 		var err error
@@ -57,7 +81,7 @@ func (c Child) Eval(ctx context.Context, req Request) ([]byte, error) {
 	if nixpkgs == "" {
 		nixpkgs = req.NixpkgsDir
 	}
-	args := []string{"nix-eval", "--json", "--system", req.System, "--nixpkgs", nixpkgs}
+	args := []string{"nix-eval", "--json", "--timings", "--system", req.System, "--nixpkgs", nixpkgs}
 	if c.Backend != "" {
 		args = append(args, "--backend", c.Backend)
 	}
@@ -103,7 +127,7 @@ func (c Child) Eval(ctx context.Context, req Request) ([]byte, error) {
 					}
 					next := c
 					next.Backend = b
-					return next.Eval(ctx, req)
+					return next.run(ctx, req)
 				}
 			}
 		}

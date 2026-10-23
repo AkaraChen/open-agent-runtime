@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestExpressionAttrs(t *testing.T) {
@@ -206,9 +207,70 @@ func TestChildSuccess(t *testing.T) {
 	if err := json.Unmarshal(out, &v); err != nil || v["hello"].Outputs[0] != "/nix/store/x-hello" {
 		t.Fatalf("%s %v", out, err)
 	}
-	want := "args: nix-eval --json --system x86_64-linux --nixpkgs " + rev + " --backend embedded -- hello"
+	want := "args: nix-eval --json --timings --system x86_64-linux --nixpkgs " + rev + " --backend embedded -- hello"
 	if !strings.Contains(log.String(), want) {
 		t.Fatalf("child args: %q", log.String())
+	}
+}
+
+// fakeOarPrinting writes a stand-in for `oar nix-eval` that prints stdout.
+func fakeOarPrinting(t *testing.T, stdout string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "stdout")
+	if err := os.WriteFile(f, []byte(stdout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fakeOar(t, `cat "`+f+`"`)
+}
+
+func TestChildTimings(t *testing.T) {
+	const result = `{"hello":{"outputs":["/nix/store/x-hello"],"mainProgram":"hello"}}`
+	for _, tc := range []struct {
+		name   string
+		stdout string
+		want   Timings
+	}{
+		{"both", `{"result":` + result + `,"timings":{"source":5300000000,"eval":250000000}}`,
+			Timings{Source: 5300 * time.Millisecond, Eval: 250 * time.Millisecond}},
+		{"no source", `{"result":` + result + `,"timings":{"eval":7}}`, Timings{Eval: 7}},
+		{"no timings", `{"result":` + result + `}`, Timings{}},
+		// a stand-in for a child that predates --timings prints the bare result
+		{"bare result", result, Timings{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Child{Executable: fakeOarPrinting(t, tc.stdout)}
+			req := Request{Nixpkgs: rev, System: "x86_64-linux", Attrs: []string{"hello"}}
+			out, tm, err := c.EvalTimed(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tm != tc.want {
+				t.Errorf("timings %+v, want %+v", tm, tc.want)
+			}
+			// what is left is the evaluator output, as ParseAttrs reads it
+			res, err := ParseAttrs(out, req.Attrs)
+			if err != nil || res["hello"].MainProgram != "hello" {
+				t.Fatalf("%s: %+v %v", out, res, err)
+			}
+			plain, err := c.Eval(context.Background(), req)
+			if err != nil || string(plain) != string(out) {
+				t.Fatalf("Eval: %s %v, EvalTimed: %s", plain, err, out)
+			}
+		})
+	}
+}
+
+func TestTimedWireFormat(t *testing.T) {
+	b, err := json.Marshal(Timed{
+		Result:  json.RawMessage(`{"hello":{"outputs":["/nix/store/x-hello"]}}`),
+		Timings: Timings{Source: 1500 * time.Millisecond, Eval: 250 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"result":{"hello":{"outputs":["/nix/store/x-hello"]}},"timings":{"source":1500000000,"eval":250000000}}`
+	if string(b) != want {
+		t.Fatalf("got  %s\nwant %s", b, want)
 	}
 }
 

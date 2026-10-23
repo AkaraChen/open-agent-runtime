@@ -3,6 +3,7 @@
 //
 //	go run ./hack/bench run -backend native -out results-native.json [-profile quick|full] [-- vm start flags]
 //	go run ./hack/bench report -title "Step 0" -out report.md [-baseline dir] results-*.json
+//	go run ./hack/bench compare -dir results -label kvm [-fail-on 10] [-min-ms 3] [-gate patterns]
 package main
 
 import (
@@ -67,7 +68,7 @@ func summarize(m *Metric) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: bench run|report ...")
+		fmt.Fprintln(os.Stderr, "usage: bench run|report|compare ...")
 		os.Exit(2)
 	}
 	var err error
@@ -76,6 +77,8 @@ func main() {
 		err = runMain(os.Args[2:])
 	case "report":
 		err = reportMain(os.Args[2:])
+	case "compare":
+		err = compareMain(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

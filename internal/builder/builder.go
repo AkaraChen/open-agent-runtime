@@ -46,6 +46,15 @@ type Stats struct {
 	FetchedBytes  int64         `json:"fetchedBytes"`
 	ClosurePaths  int           `json:"closurePaths"`
 	ClosureBytes  int64         `json:"closureBytes"`
+
+	// NixSource and EvalRun split Eval into the time the `oar nix-eval`
+	// children spent getting the nixpkgs source (downloading and extracting
+	// it; zero when it is cached) and in the evaluator itself. ComponentBuild
+	// is the part of Components spent in the build commands of sources. Like
+	// the other durations they are summed over platforms.
+	NixSource      time.Duration `json:"nixSource"`
+	EvalRun        time.Duration `json:"evalRun"`
+	ComponentBuild time.Duration `json:"componentBuild"`
 }
 
 // Builder holds state for one build invocation.
@@ -70,6 +79,10 @@ type shared struct {
 	// srcMu serializes user build commands (sources.*.build), which may
 	// share output files between platforms
 	srcMu sync.Mutex
+	// baseDigest pins the index digest of the base image. The first base
+	// stage to ask resolves it with the registry; the others get its answer,
+	// so all platforms are built from the same index.
+	baseDigest func() (string, error)
 }
 
 // stats runs fn with exclusive access to the build statistics.
@@ -205,10 +218,14 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 	if len(platforms) == 0 {
 		platforms = cfg.AllPlatforms()
 	}
-	indexDigest, err := b.resolveBaseDigest(cfg.Runtime.Base)
-	if err != nil {
-		return nil, err
-	}
+	// PERF: the digest used to be resolved here, before any platform started.
+	// The nix stage (the nixpkgs download and the evaluation, the longest
+	// chain of a build on a machine that never built) waited for a registry
+	// round trip it has no use for: a ping, a token and a HEAD, 0.6 s from
+	// Docker Hub on the machine this was measured on. Now the base stage,
+	// which needs the digest, resolves it, beside the others, once for all
+	// platforms.
+	b.baseDigest = sync.OnceValues(func() (string, error) { return b.resolveBaseDigest(cfg.Runtime.Base) })
 	lock := &manifest.Lock{
 		Version:   manifest.LockVersion,
 		Base:      cfg.Runtime.Base,
@@ -236,7 +253,7 @@ func Build(ctx context.Context, cfg *spec.Config, opts Options) (*manifest.Lock,
 		g.Go(func() error {
 			pb := *b
 			pb.ctx = gctx
-			pl, err := pb.buildPlatform(p, indexDigest)
+			pl, err := pb.buildPlatform(p)
 			if err != nil {
 				return fmt.Errorf("%s: %w", p, err)
 			}
@@ -269,7 +286,7 @@ func (b *Builder) logf(format string, args ...any) {
 	fmt.Fprintf(b.opts.Log, format+"\n", args...)
 }
 
-func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.PlatformLock, error) {
+func (b *Builder) buildPlatform(p spec.Platform) (*manifest.PlatformLock, error) {
 	refs, err := b.cfg.ResolveComponents()
 	if err != nil {
 		return nil, err
@@ -297,6 +314,10 @@ func (b *Builder) buildPlatform(p spec.Platform, indexDigest string) (*manifest.
 	g.Go(func() (err error) {
 		t := time.Now()
 		defer func() { b.stats(func(st *Stats) { st.Base += time.Since(t) }) }()
+		indexDigest, err := pb.baseDigest()
+		if err != nil {
+			return err
+		}
 		base, err = pb.buildBase(p, indexDigest)
 		return err
 	})
