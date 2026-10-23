@@ -89,3 +89,54 @@ func TestBuildSplit(t *testing.T) {
 		t.Errorf("import time must clamp at zero: %s", got)
 	}
 }
+
+func TestReuseResult(t *testing.T) {
+	b := &bench{res: &Result{}}
+	r := reuseResult{
+		steps: []reuseStep{
+			{view: 130, wall: 300},
+			{view: 12, wall: 180},
+			{view: 11, wall: 175},
+			{back: true, view: 4, wall: 90},
+		},
+		steals: 3, rebuilds: 1,
+	}
+	r.record(b, "2-warm")
+	want := []struct {
+		key, unit string
+		n         int
+		p50       float64
+		lower     bool
+	}{
+		{"reuse.view.first", "ms", 1, 130, true},
+		{"reuse.view.next", "ms", 2, 11, true},
+		{"reuse.view.back", "ms", 1, 4, true},
+		{"reuse.steals", "个", 1, 3, false},
+		{"reuse.rebuilds", "个", 1, 1, true},
+	}
+	if len(b.res.Metrics) != len(want) {
+		t.Fatalf("metrics: %+v", b.res.Metrics)
+	}
+	for i, w := range want {
+		m := b.res.Metrics[i]
+		if m.Group != "2-warm" || m.Key != w.key || m.Unit != w.unit || m.N != w.n || m.P50 != w.p50 || m.LowerIsBetter != w.lower || m.Status != "ok" {
+			t.Errorf("metric %d = %+v, want %+v", i, m, w)
+		}
+	}
+	if m := b.res.Metrics[1]; !strings.Contains(m.Note, "12.0 / 11.0") || !strings.Contains(m.Note, "180.0 / 175.0") {
+		t.Errorf("per-reload times missing from the note: %s", m.Note)
+	}
+
+	// a run that stopped after the first reload has no later ones, and one
+	// that never got to reload is n/a, not a row of zeros
+	b = &bench{res: &Result{}}
+	(&reuseResult{steps: []reuseStep{{view: 130, wall: 300}}}).record(b, "2-warm")
+	if len(b.res.Metrics) != 3 || b.res.Metrics[0].Key != "reuse.view.first" || b.res.Metrics[1].Key != "reuse.steals" {
+		t.Errorf("one reload: %+v", b.res.Metrics)
+	}
+	b = &bench{res: &Result{}}
+	(&reuseResult{}).record(b, "2-warm")
+	if len(b.res.Metrics) != 1 || b.res.Metrics[0].Status != "na" {
+		t.Errorf("no reload: %+v", b.res.Metrics)
+	}
+}
