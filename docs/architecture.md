@@ -173,7 +173,8 @@ The CLI and agent check a protocol version, so a CLI refuses to drive an outdate
 ├── store/paths/<hash-name>/       shared immutable Nix store, one directory per warmed store path
 ├── components/<sha>/tree/         extracted component trees
 ├── bundles/<digest>/bundle.json   composed bundle templates (layers + OCI spec)
-├── views/<closure>/               /nix/store views: a closure as a hard-link tree (built once per closure)
+├── views/<closure>/               /nix/store views: a closure as a hard-link tree (built once per closure);
+│   <closure>.done, .used          complete / an instance has been created on it
 └── instances/<id>/                per-container: rootfs (overlay mount), upper/, work/,
                                    config.json, console.log
 ```
@@ -232,6 +233,16 @@ Because the view is made of hard links rather than mounts, reads go straight to 
 filesystem, all bundles share one page cache for the same file, and no mounts stay resident in the
 agent's namespace (each container's mount namespace copies those, so resident mounts made every
 `runc create` slower). A view costs one directory and one link per file, built in parallel.
+
+A closure that is close to an older one does not pay that again. When a view is built, the agent
+looks for a *donor*: a view that an instance has been created on before (`views/<closure>.used`),
+that no instance mounts now, and that shares at least 8 and at least half of the store paths. The
+new view takes those store path directories from the donor by rename, one per path, and links only
+the rest; the donor is dropped, and built again like any other view if its closure is asked for
+later. A view that was only warmed ahead is never taken: the first start of its bundle finds it
+whole. So a run, reload, reload loop links the view of the first reload (the version it replaces is
+running) and renames the views of the later ones. `oar vm stats` counts the views taken apart
+(`viewSteals`) and those built again afterwards (`viewRebuilds`).
 
 ### Starting a container
 
