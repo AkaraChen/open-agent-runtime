@@ -127,7 +127,8 @@ func vmCmd(g *globalOpts) *cobra.Command {
 			}
 			g.print(st, func() {
 				fmt.Printf("memory: %s available of %s (page cache %s)\n", human(st.MemAvailable), human(st.MemTotal), human(st.Cached))
-				fmt.Printf("mounts %d, store views %d, instances %d, cgroups %d, load %.2f\n", st.Mounts, st.StoreViews, st.Instances, st.Cgroups, st.Load1)
+				fmt.Printf("mounts %d, store views %d (%d taken apart for another closure, %d built again since), instances %d, cgroups %d, load %.2f\n",
+					st.Mounts, st.StoreViews, st.ViewSteals, st.ViewRebuilds, st.Instances, st.Cgroups, st.Load1)
 				for _, k := range sortedKeys(st.CacheBytes) {
 					fmt.Printf("cache %-10s %10s  %8d files\n", k, human(st.CacheBytes[k]), st.CacheFiles[k])
 				}

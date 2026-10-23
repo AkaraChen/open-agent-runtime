@@ -66,6 +66,13 @@ type StatsResult struct {
 	Dirty        int64            `json:"dirty"`     // page cache waiting for writeback
 	Writeback    int64            `json:"writeback"` // being written back
 
+	// ViewSteals counts the /nix/store views taken apart to build another
+	// one (their store paths moved by rename instead of linked again), and
+	// ViewRebuilds the views built for a closure whose view an earlier steal
+	// had taken. Both count since the agent started.
+	ViewSteals   int `json:"viewSteals"`
+	ViewRebuilds int `json:"viewRebuilds"`
+
 	Uptime float64 `json:"uptime"`
 	Load1  float64 `json:"load1"`
 	// Boot holds guest uptimes (seconds) at boot milestones (vm mode).
