@@ -121,6 +121,7 @@ func RunInit() {
 		logInit("agent started (pid %d)", agentPid)
 	}
 	spawn()
+	go favorDynmods()
 	for {
 		select {
 		case <-children:
@@ -155,6 +156,25 @@ func powerOff() {
 	unix.Sync()
 	unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
 	os.Exit(0)
+}
+
+// favorDynmods remounts the cgroup2 hierarchy with favordynmods, which keeps
+// the cgroup threadgroup rwsem in its writer-friendly mode.
+//
+// PERF: without it, the first cgroup.procs write after a quiet period waits
+// for an RCU grace period in rcu_sync_enter(), and every runc create and
+// runc exec makes one (the container joins its cgroup that way). Measured
+// (docs/research/runc-create-profile.md): that write is 5.4 ms median (3 to
+// 15) of a 25.5 ms runc create on a Linux 7.0 host; in this guest kernel
+// under QEMU TCG it goes 8.8 -> 2.3 ms (n=60). fork and exit take a slightly
+// slower rwsem path. Enabling it costs one grace period (5 to 8 ms under
+// TCG), so it runs here, off the boot path, and the first start may still
+// race it. Kernels before Linux 6.0 reject the option; that is only logged.
+func favorDynmods() {
+	flags := uintptr(unix.MS_REMOUNT | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+	if err := unix.Mount("", "/sys/fs/cgroup", "", flags, "favordynmods"); err != nil {
+		logInit("cgroup2 favordynmods: %v", err)
+	}
 }
 
 func enableControllers() {
