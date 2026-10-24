@@ -1,6 +1,6 @@
 # Benchmark 报告
 
-每一步优化都用同一套 benchmark（`hack/bench`，CI 工作流 `bench.yml`）在 native、KVM、VZ（Intel Mac）、QEMU（Apple Silicon，TCG 模拟）四个后端上重跑，并和上一步对比。
+每一步优化都用同一套 benchmark（`hack/bench`，CI 工作流 `bench.yml`）在 native、KVM、VZ（Intel Mac）、QEMU（Apple Silicon，TCG 模拟）四个后端上重跑，并和上一步对比。第 16 步改为在本机 Apple M3 上直接实测，不再经过 CI。
 
 | 步骤 | 报告 | 内容 |
 |---|---|---|
@@ -19,7 +19,8 @@
 | 12 | [warm 加速](12-warm/README.md) | 刷盘按后端区分、上传期间后台写回、解包少系统调用、上传时建视图、qemu 上压缩传输；每项同机 A/B |
 | 13 | [**新基线**](13-baseline/README.md) | 构建三路并行、guest 不校验 sha256、解包和建 view 改用目录 fd 系统调用、数据盘不保证持久化、vz 改用 vmnet 网络（修好 CI 上 vz 的"挂起"）；之后的优化以这里为基线 |
 | 14 | [第二轮优化](14-round2/README.md) | 测量修正（CLI 轮询、就绪轮询量化、机器首次构建、按 CPU 型号判定、runc 子进程数）；启动路径少 exec runc、pidfd 停止；VM 启动探测；guest 内核裁剪与 `rcu_expedited`；解包缓冲复用；nixpkgs 源码流水线解包；view 复用（只拆已启动且空闲的） |
-| 15 | [main](15-main/README.md) | 第二轮优化合并后 main 的完整运行；README 性能表的数据来源 |
+| 15 | [main](15-main/README.md) | 第二轮优化合并后 main 的完整运行；README 性能表 Linux 列的数据来源 |
+| 16 | [**Apple M3 本地实测**](16-local-m3/README.md) | 不用 CI，在本机 Apple M3 上跑 `quick`（VZ，硬件虚拟化）；README 性能表 macOS 列的数据来源 |
 
 复现方法：
 

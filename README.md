@@ -102,28 +102,33 @@ Read the [architecture guide](docs/architecture.md) for the full design.
 
 ## Performance
 
-Measured on GitHub-hosted CI runners with `hack/bench` (4 vCPUs on Linux; the guest VM gets 2 vCPUs
-and 4 GiB), on the example environment: Debian, Node.js, Python, git and a custom binary, 120 Nix
-store paths, 553 MiB. Medians. Full results, including p99 and every intermediate step, are in
-[docs/benchmarks/15-main](docs/benchmarks/15-main/README.md).
+Measured with `hack/bench` on the example environment: Debian, Node.js, Python, git and a custom
+binary, 120 Nix store paths, 553 MiB. Medians. The macOS column was measured locally on an Apple M3
+(8 cores, 24 GiB, macOS 27) with the guest VM given 2 vCPUs and 4 GiB, using hardware
+virtualization through Virtualization.framework. The Linux columns are from the GitHub-hosted
+runners of the [main benchmark](docs/benchmarks/15-main/README.md). Full local results, including
+p99 and every intermediate step, are in
+[docs/benchmarks/16-local-m3](docs/benchmarks/16-local-m3/README.md).
 
-| | Linux, native | Linux, KVM | macOS, VZ ¹ | macOS, QEMU ² |
-|---|---|---|---|---|
-| Start a warm environment (`oar run`) | 37 ms | 36 ms | 213 ms | 474 ms |
-| Switch versions through the ingress proxy, 0 dropped requests | 61 ms | 59 ms | 444 ms | 592 ms |
-| Switch to a pre-created instance | 38 ms | 37 ms | 272 ms | 285 ms |
-| Switch a slow-starting app to its hot standby | 13 ms | 13 ms | 87 ms | 62 ms |
-| Restore an app from its snapshot | 60 ms | 47 ms | 352 ms | — |
-| Reload to an environment with one new package (upload included) | 49 ms | 49 ms | 746 ms | 587 ms |
-| 10 environments started at once, each | 167 ms | 164 ms | 1.4 s | 2.5 s |
-| Boot the resident VM | — | 204 ms | 10.2 s | 2.7 s |
-| Warm the whole environment into the VM (553 MiB) | 1.4 s | 1.4 s | 44 s | 41 s |
-| Build from scratch (nixpkgs source cached) | 2.1 s | 1.5 s | 8.8 s | 4.7 s |
+| | Linux, native | Linux, KVM | macOS, VZ (Apple M3) |
+|---|---|---|---|
+| Start a warm environment (`oar run`) | 37 ms | 36 ms | 28 ms |
+| Switch versions through the ingress proxy, 0 dropped requests | 61 ms | 59 ms | 41 ms |
+| Switch to a pre-created instance | 38 ms | 37 ms | 26 ms |
+| Switch a slow-starting app to its hot standby | 13 ms | 13 ms | 19 ms |
+| Restore an app from its snapshot | 60 ms | 47 ms | — ¹ |
+| Reload to an environment with one new package (upload included) | 49 ms | 49 ms | 46 ms |
+| 10 environments started at once, each | 167 ms | 164 ms | 121 ms |
+| Boot the resident VM | — | 204 ms | 520 ms |
+| Warm the whole environment into the VM (553 MiB) | 1.4 s | 1.4 s | 2.3 s |
+| Build from scratch (nixpkgs source cached) | 2.1 s | 1.5 s | 41 s |
+| Build from scratch, WAN excluded | — | — | 1.8 s ² |
 
-¹ An Intel Mac runner, which runs the VM under nested virtualization; most of the boot time is VZ
-loading the kernel there. ² Apple Silicon with no hardware virtualization on CI, so the arm64 guest
-runs under TCG emulation. Real Macs are expected to be much faster in both columns; they have not
-been measured yet.
+¹ Snapshots are not available on Apple Silicon yet: CRIU is not packaged for the arm64 guest image.
+² macOS only: the base image and the Nix closure were served from a local registry and HTTP mirror,
+so this measures flattening, decoding and component work without WAN downloads. The row above
+includes them for every column; on this Mac it is 41 s because the download dominated the build
+(it varies with connection speed).
 
 ## Getting started
 

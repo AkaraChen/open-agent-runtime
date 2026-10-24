@@ -92,26 +92,30 @@ flowchart LR
 
 ## 性能
 
-数据来自 GitHub 托管的 CI runner 上的 `hack/bench`（Linux 上 4 个 vCPU；guest 虚拟机分到 2 个 vCPU、4 GiB），
-测的是示例环境：Debian、Node.js、Python、git 加一个自定义二进制，共 120 个 Nix store path、553 MiB。表中是中位数。
-完整结果（含 p99 和每一步的拆分）见 [docs/benchmarks/15-main](docs/benchmarks/15-main/README.md)。
+测量使用 `hack/bench`，测的是示例环境：Debian、Node.js、Python、git 加一个自定义二进制，共 120 个
+Nix store path、553 MiB。表中是中位数。macOS 列在本机 Apple M3（8 核、24 GiB 内存、macOS 27，
+guest 分配 2 个 vCPU、4 GiB）上实测，走 Virtualization.framework 硬件虚拟化；Linux 列来自
+[主 benchmark](docs/benchmarks/15-main/README.md) 的 GitHub 托管 runner。本机完整结果（含 p99
+和每一步的拆分）见 [docs/benchmarks/16-local-m3](docs/benchmarks/16-local-m3/README.md)。
 
-| | Linux，native | Linux，KVM | macOS，VZ ¹ | macOS，QEMU ² |
-|---|---|---|---|---|
-| 启动已预热的环境（`oar run`） | 37 ms | 36 ms | 213 ms | 474 ms |
-| 经入口代理切换版本，0 个请求失败 | 61 ms | 59 ms | 444 ms | 592 ms |
-| 切换到预创建的实例 | 38 ms | 37 ms | 272 ms | 285 ms |
-| 慢启动应用切换到热备 | 13 ms | 13 ms | 87 ms | 62 ms |
-| 从快照恢复应用 | 60 ms | 47 ms | 352 ms | — |
-| reload 到多一个新包的环境（含上传） | 49 ms | 49 ms | 746 ms | 587 ms |
-| 同时启动 10 个环境，单个耗时 | 167 ms | 164 ms | 1.4 s | 2.5 s |
-| 启动常驻虚拟机 | — | 204 ms | 10.2 s | 2.7 s |
-| 把整个环境预热进虚拟机（553 MiB） | 1.4 s | 1.4 s | 44 s | 41 s |
-| 从零构建（nixpkgs 源码已缓存） | 2.1 s | 1.5 s | 8.8 s | 4.7 s |
+| | Linux，native | Linux，KVM | macOS，VZ（Apple M3） |
+|---|---|---|---|
+| 启动已预热的环境（`oar run`） | 37 ms | 36 ms | 28 ms |
+| 经入口代理切换版本，0 个请求失败 | 61 ms | 59 ms | 41 ms |
+| 切换到预创建的实例 | 38 ms | 37 ms | 26 ms |
+| 慢启动应用切换到热备 | 13 ms | 13 ms | 19 ms |
+| 从快照恢复应用 | 60 ms | 47 ms | — ¹ |
+| reload 到多一个新包的环境（含上传） | 49 ms | 49 ms | 46 ms |
+| 同时启动 10 个环境，单个耗时 | 167 ms | 164 ms | 121 ms |
+| 启动常驻虚拟机 | — | 204 ms | 520 ms |
+| 把整个环境预热进虚拟机（553 MiB） | 1.4 s | 1.4 s | 2.3 s |
+| 从零构建（nixpkgs 源码已缓存） | 2.1 s | 1.5 s | 41 s |
+| 从零构建（去掉 WAN 下载） | — | — | 1.8 s ² |
 
-¹ Intel Mac runner，虚拟机跑在嵌套虚拟化里，启动时间大部分花在 VZ 加载内核上。
-² CI 上的 Apple Silicon 没有硬件虚拟化，arm64 guest 用 TCG 模拟运行。
-两列在真机上预计都会快很多，但还没有实测。
+¹ Apple Silicon 上暂不支持快照：arm64 guest 镜像里没有打包 CRIU。
+² 仅 macOS：基础镜像和 Nix 闭包分别由本机 registry 与 HTTP mirror 提供，只计算展平、解包和
+组件构建，不含公网下载；上一行各列都包含下载，这台机器上因为下载占主导而是 41 s（随带宽
+波动很大）。
 
 ## 快速开始
 
